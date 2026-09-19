@@ -12,6 +12,6 @@ export async function POST(req:Request){
   if(!r.ok){const errBody=await r.text();return NextResponse.json({error:"OpenRouter request failed ("+r.status+"): "+errBody.slice(0,300)},{status:502})}
   const data=await r.json(); const text=String(data?.choices?.[0]?.message?.content||"").trim().toUpperCase(); const isoMatch=text.match(/\b[A-Z]{2}\b/); const chosen=body.candidates.find(c=>c.iso2===isoMatch?.[0]);
   if(!chosen)return NextResponse.json({error:"AI returned an invalid candidate selection: "+text.slice(0,80)},{status:502});
-  return NextResponse.json({mode:"live",selectedIso2:chosen.iso2,model,rawResponse:text,latencyMs:Date.now()-started});
+  return NextResponse.json({mode:"live",selectedIso2:chosen.iso2,model,rawResponse:text,latencyMs:Date.now()-started,communication:{provider:"OpenRouter",model,request:{model,messages:[{role:"user",content:prompt}],temperature:0,max_tokens:8},response:data,latencyMs:Date.now()-started}});
  }catch(e:any){return NextResponse.json({error:"OpenRouter request errored",message:e?.message||String(e)},{status:502})}
 }

@@ -12,10 +12,28 @@ function extractJson(text:string){
   return null;
 }
 
+let entitlementCache:{token:string;ok:boolean;at:number}|null=null;
+const ENTITLEMENT_TTL_MS=5*60*1000;
+
+async function hasCopilotEntitlement(token:string):Promise<boolean>{
+  const now=Date.now();
+  if(entitlementCache&&entitlementCache.token===token&&now-entitlementCache.at<ENTITLEMENT_TTL_MS)return entitlementCache.ok;
+  let ok=false;
+  try{
+    const res=await fetch("https://api.github.com/copilot_internal/v2/token",{
+      headers:{Authorization:`token ${token}`,"Editor-Version":"vscode/1.85.0","Editor-Plugin-Version":"copilot-chat/0.11.0"}
+    });
+    ok=res.ok;
+  }catch{ok=false}
+  entitlementCache={token,ok,at:now};
+  return ok;
+}
+
 export async function GET(){
-  const configured=Boolean(process.env.COPILOT_GITHUB_TOKEN||process.env.GH_TOKEN||process.env.GITHUB_TOKEN);
+  const token=process.env.COPILOT_GITHUB_TOKEN||process.env.GH_TOKEN||process.env.GITHUB_TOKEN;
   const model=process.env.COPILOT_MODEL||"gpt-5.4";
   const models=(process.env.COPILOT_MODELS||model).split(",").map(x=>x.trim()).filter(Boolean);
+  const configured=Boolean(token)&&await hasCopilotEntitlement(token!);
   return NextResponse.json({configured,model,models});
 }
 
@@ -25,7 +43,7 @@ export async function POST(req:Request){
   const token=process.env.COPILOT_GITHUB_TOKEN||process.env.GH_TOKEN||process.env.GITHUB_TOKEN;
   if(!token)return NextResponse.json({error:"GitHub Copilot is not configured. Set COPILOT_GITHUB_TOKEN on the server."},{status:503});
   const model=body.model||process.env.COPILOT_MODEL||"gpt-5.4";
-  const client=new CopilotClient({env:{...process.env,COPILOT_GITHUB_TOKEN:token},useLoggedInUser:false});
+  const client=new CopilotClient({gitHubToken:token,useLoggedInUser:false});
   try{
     await client.start();
     const session=await client.createSession({model});

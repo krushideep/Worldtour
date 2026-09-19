@@ -98,7 +98,6 @@ async function run(){if(!cities.length||busyRef.current)return;busyRef.current=t
       };
       const distanceMatrix=buildDistanceMatrix([startCity,...tourCities]); const jevMode: JEVMode=algorithm==="JEV Matrix"?"matrix":algorithm==="JEV Distance"||algorithm==="JEV Distance + 2-opt"?"distance":"geographic"; const j=isAiLike?await aiEngine(tourCities,startCity,aiModel,settings,onStep):await jev(tourCities,startCity,settings,jevMode,distanceMatrix,setProviderMode,onStep);
       const wantsTwoOpt=algorithm.endsWith("2-opt");
-      const x=wantsTwoOpt?twoOpt(j.route):j.route;
       if(wantsTwoOpt)pushLog({note:`running 2-opt refinement on the ${dist(j.route).toFixed(0)} km greedy route`});
       const finalDist=dist(x);
       setResult({algorithm,route:x,distanceKm:finalDist,runtimeMs:performance.now()-t,decisions:j.decisions});
@@ -133,10 +132,6 @@ async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.cur
   if(benchAlgos.includes("JEV")||benchAlgos.includes("JEV + 2-opt")){
     setBenchLive({algorithm:"JEV",route:[startCity],decisions:[]});
     const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
-    const distanceMatrix=buildDistanceMatrix([startCity,...tourCities]); const selectedJevModes: JEVMode[]=[...(benchAlgos.includes("JEV")||benchAlgos.includes("JEV + 2-opt")?["geographic" as JEVMode]:[]),...(benchAlgos.includes("JEV Distance")||benchAlgos.includes("JEV Distance + 2-opt")?["distance" as JEVMode]:[]),...(benchAlgos.includes("JEV Matrix")||benchAlgos.includes("JEV Matrix + 2-opt")?["matrix" as JEVMode]:[])]; for(const jm of selectedJevModes){setBenchLive({algorithm:"JEV "+(jm==="geographic"?"":jm==="distance"?"Distance":"Matrix"),route:[startCity],decisions:[]}); const onStep2=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev); const j=await jev(tourCities,startCity,settings,jm,distanceMatrix,setProviderMode,onStep2); const label="JEV "+(jm==="geographic"?"":jm==="distance"?"Distance":"Matrix"); setBenchLive(null); if(benchAlgos.includes(label))push(await t(async()=>({algorithm:label,route:j.route,distanceKm:dist(j.route),runtimeMs:0,decisions:j.decisions}))); const optLabel=label+" + 2-opt"; if(benchAlgos.includes(optLabel))push(await t(async()=>{const x=twoOpt(j.route);return{algorithm:optLabel,route:x,distanceKm:dist(x),runtimeMs:0,decisions:j.decisions}}));}
-    setBenchLive(null);
-    if(benchAlgos.includes("JEV"))push(await t(async()=>({algorithm:"JEV",route:j.route,distanceKm:dist(j.route),runtimeMs:0,decisions:j.decisions})));
-    if(benchAlgos.includes("JEV + 2-opt"))push(await t(async()=>{const x=twoOpt(j.route);return{algorithm:"JEV + 2-opt",route:x,distanceKm:dist(x),runtimeMs:0,decisions:j.decisions}}));
   }
 
   if(aiConfigured){
@@ -144,7 +139,6 @@ async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.cur
       setBenchLive({algorithm:"AI: "+model,route:[startCity],decisions:[]});
       const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
       const ai=await t(async()=>{const r=await aiEngine(tourCities,startCity,model,settings,onStep);return{algorithm:"AI: "+model,route:r.route,distanceKm:dist(r.route),runtimeMs:0,decisions:r.decisions}});
-      setBenchLive(null);
       push(ai);
       push(await t(async()=>{const x=twoOpt(ai.route);return{algorithm:"AI: "+model+" + 2-opt",route:x,distanceKm:dist(x),runtimeMs:0,decisions:ai.decisions}}));
     }

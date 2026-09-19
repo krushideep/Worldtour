@@ -63,7 +63,7 @@ export async function POST(req:Request){
     }
     await session.disconnect();
     await client.stop();
-    return NextResponse.json({selectedIso2,model,latencyMs:Date.now()-started});
+    return NextResponse.json({selectedIso2,model,latencyMs:Date.now()-started,communication:{provider:"GitHub Copilot",model,request:{prompt},response:{content:response?.data?.content||""},latencyMs:Date.now()-started}});
   }catch(e:any){
     try{await client.stop()}catch{}
     return NextResponse.json({error:"Copilot request failed",message:e?.message||String(e),model},{status:502});

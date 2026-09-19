@@ -55,7 +55,7 @@ export async function POST(req:Request){
     if(data.is_error)return NextResponse.json({error:"Claude CLI returned an error",message:data.result||"unknown error",model},{status:502});
     const selected=extractIso2(String(data.result||""),body.candidates);
     if(!selected)return NextResponse.json({error:"Claude CLI returned an invalid candidate selection",raw:String(data.result||"").slice(0,300)},{status:502});
-    return NextResponse.json({selectedIso2:selected.iso2,model,latencyMs:data.duration_ms??(Date.now()-started),costUsd:data.total_cost_usd});
+    return NextResponse.json({selectedIso2:selected.iso2,model,latencyMs:data.duration_ms??(Date.now()-started),costUsd:data.total_cost_usd,communication:{provider:"Claude CLI",model,request:{command:"claude -p --output-format json --disallowedTools * --model "+model,prompt},response:data,latencyMs:data.duration_ms??(Date.now()-started)}});
   }catch(e:any){
     let message=e?.message||String(e);
     if(typeof e?.stdout==="string"&&e.stdout.trim()){

@@ -5,10 +5,11 @@ import {feature} from "topojson-client";
 import world from "world-atlas/countries-110m.json";
 
 type Capital={country:string;iso2:string;iso3:string;capital:string;lat:number;lon:number;region:string};
-type Decision={step:number;from:Capital;selected:Capital;candidates:{city:Capital;score:number;confidence?:number}[];distanceKm:number;confidence?:number;oracleIso2?:string;regretKm?:number};
+type Decision={step:number;from:Capital;selected:Capital;candidates:{city:Capital;score:number;confidence?:number}[];distanceKm:number;confidence?:number;oracleIso2?:string;regretKm?:number;latencyMs?:number};
 type Result={algorithm:string;route:Capital[];distanceKm:number;runtimeMs:number;decisions:Decision[]};
 type LogEntry={step:number;from:string;to:string;km:number;pct?:number;candidates?:string}|{note:string};
 type Settings={};
+type JEVMode="geographic"|"distance"|"matrix";
 const EMPTY_SETTINGS:Settings={};
 const SETTINGS_KEY="worldtour_settings";
 function jevHeaders(){return {"content-type":"application/json"}}
@@ -26,16 +27,21 @@ function nearest(c:Capital[],start:Capital=HOME){const a=[...c],out=[start];let 
 function twoOpt(route:Capital[]){const o=[...route];let improved=true,loops=0;while(improved&&loops++<1000){improved=false;for(let i=1;i<o.length-3;i++)for(let j=i+1;j<o.length-1;j++){const old=hav(o[i-1],o[i])+hav(o[j],o[j+1]),neu=hav(o[i-1],o[j])+hav(o[i],o[j+1]);if(neu<old-1e-7){o.splice(i,j-i+1,...o.slice(i,j+1).reverse());improved=true}}}return o}
 function oracleChoice(cur:Capital,cs:Capital[],rem:Capital[]){const scored=cs.map(c=>{const rest=rem.filter(x=>x.iso2!==c.iso2);const next=rest.length?Math.min(...rest.map(x=>hav(c,x))):0;return{iso2:c.iso2,cost:hav(cur,c)+next}}).sort((a,b)=>a.cost-b.cost);return scored[0]||null}
 function candidates(cur:Capital,rem:Capital[],seed:number){const near=[...rem].sort((x,y)=>hav(cur,x)-hav(cur,y));const p=near.slice(0,4);const far=[...rem].sort((x,y)=>hav(cur,y)-hav(cur,x)).filter(x=>!p.includes(x));p.push(...far.slice(0,2));const pick=rng(seed+97);while(p.length<8&&p.length<rem.length){const x=rem[Math.floor(pick()*rem.length)];if(!p.includes(x))p.push(x)}return p.slice(0,8)}
-async function jevDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],settings:Settings):Promise<{ranked:{city:Capital;confidence:number}[];mode:"demo"|"live"}>{
-  const res=await fetch("/api/jev",{method:"POST",headers:jevHeaders(),body:JSON.stringify({step,current,candidates:cs,remaining:rem})});
+function buildDistanceMatrix(all:Capital[]){const m:Record<string,Record<string,number>>={};for(const a of all){m[a.iso2]={};for(const b of all)m[a.iso2][b.iso2]=hav(a,b)}return m}
+function distanceFeatures(current:Capital,cs:Capital[],rem:Capital[],matrix:Record<string,Record<string,number>>){return cs.map(c=>{const rest=rem.filter(x=>x.iso2!==c.iso2);const vals=rest.map(x=>matrix[c.iso2]?.[x.iso2]??hav(c,x));return{iso2:c.iso2,currentKm:matrix[current.iso2]?.[c.iso2]??hav(current,c),nearestFutureKm:vals.length?Math.min(...vals):0,farthestFutureKm:vals.length?Math.max(...vals):0}})}
+async function jevDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],settings:Settings,mode:JEVMode,matrix:Record<string,Record<string,number>>):Promise<{ranked:{city:Capital;confidence:number}[];mode:"demo"|"live";latencyMs?:number}>{
+  const started=performance.now();
+  const features=distanceFeatures(current,cs,rem,matrix);
+  const payload={step,current,candidates:cs,remaining:rem,mode,distanceFeatures:features,distanceMatrix:mode==="matrix"?matrix:undefined};
+  const res=await fetch("/api/jev",{method:"POST",headers:jevHeaders(),body:JSON.stringify(payload)});
   const data=await res.json();
   if(!res.ok||data.error)throw new Error(data.error||"JEV request failed ("+res.status+")");
   const byIso=new Map(cs.map(c=>[c.iso2,c]));
   const ranked=(data.ranked as {iso2:string;confidence:number}[]).map(r=>({city:byIso.get(r.iso2)!,confidence:r.confidence})).filter(x=>x.city);
   if(!ranked.length)throw new Error("JEV response did not match any candidate");
-  return{ranked,mode:data.mode as "demo"|"live"};
+  return{ranked,mode:data.mode as "demo"|"live",latencyMs:data.latencyMs??(performance.now()-started)};
 }
-async function jev(c:Capital[],start:Capital=HOME,settings:Settings=EMPTY_SETTINGS,onMode?:(m:"demo"|"live")=>void,onStep?:(d:Decision,routeSoFar:Capital[])=>void){let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;while(rem.length){if(ds.length>=maxSteps)throw new Error("JEV loop exceeded expected step count ("+maxSteps+") — aborting to avoid runaway API calls");const cs=candidates(cur,rem,route.length*19);const{ranked,mode}=await jevDecide(route.length,cur,cs,rem,settings);onMode?.(mode);const pick=ranked[0].city;const oracle=oracleChoice(cur,cs,rem);const chosenCost=oracle?oracle.cost:0;const selectedCost=hav(cur,pick)+(rem.length>1?Math.min(...rem.filter(x=>x.iso2!==pick.iso2).map(x=>hav(pick,x))):0);const d={step:route.length,from:cur,selected:pick,candidates:ranked.map(x=>({city:x.city,score:x.confidence,confidence:x.confidence})),distanceKm:hav(cur,pick),confidence:ranked[0].confidence,oracleIso2:oracle?.iso2,regretKm:Math.max(0,selectedCost-chosenCost)};ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x!==pick);cur=pick}route.push(start);return{route,decisions:ds}}
+async function jev(c:Capital[],start:Capital=HOME,settings:Settings=EMPTY_SETTINGS,mode:JEVMode="geographic",matrix:Record<string,Record<string,number>>={},onMode?:(m:"demo"|"live")=>void,onStep?:(d:Decision,routeSoFar:Capital[])=>void){let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;while(rem.length){if(ds.length>=maxSteps)throw new Error("JEV loop exceeded expected step count ("+maxSteps+") — aborting to avoid runaway API calls");const cs=candidates(cur,rem,route.length*19);const{ranked,mode:providerMode,latencyMs}=await jevDecide(route.length,cur,cs,rem,settings,mode,matrix);onMode?.(providerMode);const pick=ranked[0].city;const oracle=oracleChoice(cur,cs,rem);const chosenCost=oracle?oracle.cost:0;const selectedCost=hav(cur,pick)+(rem.length>1?Math.min(...rem.filter(x=>x.iso2!==pick.iso2).map(x=>hav(pick,x))):0);const d={step:route.length,from:cur,selected:pick,candidates:ranked.map(x=>({city:x.city,score:x.confidence,confidence:x.confidence})),distanceKm:hav(cur,pick),confidence:ranked[0].confidence,oracleIso2:oracle?.iso2,regretKm:Math.max(0,selectedCost-chosenCost),latencyMs};ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x!==pick);cur=pick}route.push(start);return{route,decisions:ds}}
 async function aiDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],model:string,settings:Settings):Promise<{selected:Capital}>{
   const res=await fetch("/api/ai-engine",{method:"POST",headers:aiHeaders(),body:JSON.stringify({step,current,candidates:cs,remaining:rem,model})});
   const data=await res.json();
@@ -48,7 +54,7 @@ async function aiEngine(c:Capital[],start:Capital=HOME,model:string,settings:Set
 async function load():Promise<Capital[]>{const r=await fetch("https://raw.githubusercontent.com/Stefie/geojson-world/46cbac88be743326b247baee180928683d0afe9f/capitals.geojson");if(!r.ok)throw Error("Capital dataset unavailable");const j=await r.json(),m=new Map<string,Capital>();for(const f of j.features||[]){const p=f.properties||{},id=p.iso2||f.id,name=p.city||conventions[id];if(!ISO195.has(id)||!name||!f.geometry?.coordinates)continue;m.set(id,{country:p.country,iso2:id,iso3:p.iso3,capital:conventions[id]||name,lon:f.geometry.coordinates[0],lat:f.geometry.coordinates[1],region:"Other"})}for(const id in manual)if(!m.has(id))m.set(id,manual[id]);const ov:Record<string,[number,number]>={LK:[6.9271,79.8612],BO:[-19.0196,-65.2619],ZA:[-25.7479,28.2293],TZ:[-6.163,35.7516],PS:[31.9038,35.2034],IN:[28.6139,77.209]};for(const k in ov)if(m.has(k)){m.get(k)!.lat=ov[k][0];m.get(k)!.lon=ov[k][1]}const out=[...m.values()].sort((a,b)=>a.country.localeCompare(b.country));if(out.length!==195)throw Error("Expected 195 capitals, found "+out.length);return out}
 
 const AI_MODELS=["openai/gpt-4o-mini","google/gemini-2.0-flash-001","anthropic/claude-3.5-haiku","meta-llama/llama-3.1-8b-instruct","qwen/qwen-2.5-72b-instruct"];
-const BASE_ALGOS=["Random","Nearest Neighbor","NN + 2-opt","JEV","JEV + 2-opt"];
+const BASE_ALGOS=["Random","Nearest Neighbor","NN + 2-opt","JEV","JEV + 2-opt","JEV Distance","JEV Distance + 2-opt","JEV Matrix","JEV Matrix + 2-opt"];
 function pad(n:number){return String(n).padStart(3,"0")}
 function decisionLine(d:Decision){return `${pad(d.step)}  ${d.from.capital} → ${d.selected.capital}   ${d.distanceKm.toFixed(0)} km   ${Math.round(d.confidence*100)}%`}
 function DecisionMini({d}:{d?:Decision}){
@@ -86,7 +92,7 @@ async function run(){if(!cities.length||busyRef.current)return;busyRef.current=t
         setResult(prev=>prev?{...prev,route:routeSoFar,distanceKm:cumulative,runtimeMs:performance.now()-t,decisions:[...prev.decisions,d]}:prev);
         pushLog({step:d.step,from:d.from.capital,to:d.selected.capital,km:d.distanceKm,pct:d.confidence!=null?Math.round(d.confidence*100):undefined,candidates:d.candidates.map(x=>x.city.capital).join(", ")});
       };
-      const j=isAiLike?await aiEngine(tourCities,startCity,aiModel,settings,onStep):await jev(tourCities,startCity,settings,setProviderMode,onStep);
+      const distanceMatrix=buildDistanceMatrix([startCity,...tourCities]); const jevMode: JEVMode=algorithm==="JEV Matrix"?"matrix":algorithm==="JEV Distance"||algorithm==="JEV Distance + 2-opt"?"distance":"geographic"; const j=isAiLike?await aiEngine(tourCities,startCity,aiModel,settings,onStep):await jev(tourCities,startCity,settings,jevMode,distanceMatrix,setProviderMode,onStep);
       const wantsTwoOpt=algorithm.endsWith("2-opt");
       const x=wantsTwoOpt?twoOpt(j.route):j.route;
       if(wantsTwoOpt)pushLog({note:`running 2-opt refinement on the ${dist(j.route).toFixed(0)} km greedy route`});
@@ -123,7 +129,7 @@ async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.cur
   if(benchAlgos.includes("JEV")||benchAlgos.includes("JEV + 2-opt")){
     setBenchLive({algorithm:"JEV",route:[startCity],decisions:[]});
     const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
-    const j=await jev(tourCities,startCity,settings,setProviderMode,onStep);
+    const distanceMatrix=buildDistanceMatrix([startCity,...tourCities]); const selectedJevModes: JEVMode[]=[...(benchAlgos.includes("JEV")||benchAlgos.includes("JEV + 2-opt")?["geographic" as JEVMode]:[]),...(benchAlgos.includes("JEV Distance")||benchAlgos.includes("JEV Distance + 2-opt")?["distance" as JEVMode]:[]),...(benchAlgos.includes("JEV Matrix")||benchAlgos.includes("JEV Matrix + 2-opt")?["matrix" as JEVMode]:[])]; for(const jm of selectedJevModes){setBenchLive({algorithm:"JEV "+(jm==="geographic"?"":jm==="distance"?"Distance":"Matrix"),route:[startCity],decisions:[]}); const onStep2=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev); const j=await jev(tourCities,startCity,settings,jm,distanceMatrix,setProviderMode,onStep2); const label="JEV "+(jm==="geographic"?"":jm==="distance"?"Distance":"Matrix"); setBenchLive(null); if(benchAlgos.includes(label))push(await t(async()=>({algorithm:label,route:j.route,distanceKm:dist(j.route),runtimeMs:0,decisions:j.decisions}))); const optLabel=label+" + 2-opt"; if(benchAlgos.includes(optLabel))push(await t(async()=>{const x=twoOpt(j.route);return{algorithm:optLabel,route:x,distanceKm:dist(x),runtimeMs:0,decisions:j.decisions}}));}
     setBenchLive(null);
     if(benchAlgos.includes("JEV"))push(await t(async()=>({algorithm:"JEV",route:j.route,distanceKm:dist(j.route),runtimeMs:0,decisions:j.decisions})));
     if(benchAlgos.includes("JEV + 2-opt"))push(await t(async()=>{const x=twoOpt(j.route);return{algorithm:"JEV + 2-opt",route:x,distanceKm:dist(x),runtimeMs:0,decisions:j.decisions}}));

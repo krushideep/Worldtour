@@ -8,11 +8,11 @@ type Capital={country:string;iso2:string;iso3:string;capital:string;lat:number;l
 type Decision={step:number;from:Capital;selected:Capital;candidates:{city:Capital;score:number;confidence?:number}[];distanceKm:number;confidence?:number};
 type Result={algorithm:string;route:Capital[];distanceKm:number;runtimeMs:number;decisions:Decision[]};
 type LogEntry={step:number;from:string;to:string;km:number;pct?:number;candidates?:string}|{note:string};
-type Settings={jevApiUrl:string;jevApiKey:string;jevModel:string;openrouterApiKey:string};
-const EMPTY_SETTINGS:Settings={jevApiUrl:"",jevApiKey:"",jevModel:"",openrouterApiKey:""};
+type Settings={};
+const EMPTY_SETTINGS:Settings={};
 const SETTINGS_KEY="worldtour_settings";
-function jevHeaders(s:Settings){const h:Record<string,string>={"content-type":"application/json"};if(s.jevApiUrl)h["x-jev-api-url"]=s.jevApiUrl;if(s.jevApiKey)h["x-jev-api-key"]=s.jevApiKey;if(s.jevModel)h["x-jev-model"]=s.jevModel;return h}
-function aiHeaders(s:Settings){const h:Record<string,string>={"content-type":"application/json"};if(s.openrouterApiKey)h["x-openrouter-api-key"]=s.openrouterApiKey;return h}
+function jevHeaders(){return {"content-type":"application/json"}}
+function aiHeaders(){return {"content-type":"application/json"}}
 
 const HOME:Capital={country:"India",iso2:"IN",iso3:"IND",capital:"Bengaluru",lat:12.9716,lon:77.5946,region:"Asia"};
 const ISO195=new Set("AF AL DZ AD AO AG AR AM AU AT AZ BS BH BD BB BY BE BZ BJ BT BO BA BW BR BN BG BF BI CV KH CM CA CF TD CL CN CO KM CG CD CR CI HR CU CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FJ FI FR GA GM GE DE GH GR GD GT GN GW GY HT HN HU IS IN ID IR IQ IE IL IT JM JP JO KZ KE KI KP KR KW KG LA LV LB LS LR LY LI LT LU MG MW MY MV ML MT MH MR MU MX FM MD MC MN ME MA MZ MM NA NR NP NL NZ NI NE NG MK NO OM PK PW PA PG PY PE PH PL PT QA RO RU RW KN LC VC WS SM ST SA SN RS SC SL SG SK SI SB SO ZA SS ES LK SD SR SE CH SY TJ TZ TH TL TG TO TT TN TR TM TV UG UA AE GB US UY UZ VU VA VE VN YE ZM ZW PS".split(" "));
@@ -26,7 +26,7 @@ function nearest(c:Capital[],start:Capital=HOME){const a=[...c],out=[start];let 
 function twoOpt(route:Capital[]){const o=[...route];let improved=true,loops=0;while(improved&&loops++<1000){improved=false;for(let i=1;i<o.length-3;i++)for(let j=i+1;j<o.length-1;j++){const old=hav(o[i-1],o[i])+hav(o[j],o[j+1]),neu=hav(o[i-1],o[j])+hav(o[i],o[j+1]);if(neu<old-1e-7){o.splice(i,j-i+1,...o.slice(i,j+1).reverse());improved=true}}}return o}
 function candidates(cur:Capital,rem:Capital[],seed:number){const a=[...rem].sort((x,y)=>hav(cur,x)-hav(cur,y));const p=a.slice(0,3);p.push(...rem.filter(x=>x.region===cur.region&&!p.includes(x)).slice(0,2));const far=[...rem].sort((x,y)=>hav(cur,y)-hav(cur,x)).filter(x=>!p.includes(x));if(far[0])p.push(far[Math.floor(rng(seed)()*Math.min(5,far.length))]);const pick=rng(seed+97);while(p.length<8&&p.length<rem.length){const x=rem[Math.floor(pick()*rem.length)];if(!p.includes(x))p.push(x)}return p.slice(0,8)}
 async function jevDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],settings:Settings):Promise<{ranked:{city:Capital;confidence:number}[];mode:"demo"|"live"}>{
-  const res=await fetch("/api/jev",{method:"POST",headers:jevHeaders(settings),body:JSON.stringify({step,current,candidates:cs,remaining:rem})});
+  const res=await fetch("/api/jev",{method:"POST",headers:jevHeaders(),body:JSON.stringify({step,current,candidates:cs,remaining:rem})});
   const data=await res.json();
   if(!res.ok||data.error)throw new Error(data.error||"JEV request failed ("+res.status+")");
   const byIso=new Map(cs.map(c=>[c.iso2,c]));
@@ -35,16 +35,15 @@ async function jevDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],
   return{ranked,mode:data.mode as "demo"|"live"};
 }
 async function jev(c:Capital[],start:Capital=HOME,settings:Settings=EMPTY_SETTINGS,onMode?:(m:"demo"|"live")=>void,onStep?:(d:Decision,routeSoFar:Capital[])=>void){let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;while(rem.length){if(ds.length>=maxSteps)throw new Error("JEV loop exceeded expected step count ("+maxSteps+") — aborting to avoid runaway API calls");const cs=candidates(cur,rem,route.length*19);const{ranked,mode}=await jevDecide(route.length,cur,cs,rem,settings);onMode?.(mode);const pick=ranked[0].city;const d={step:route.length,from:cur,selected:pick,candidates:ranked.map(x=>({city:x.city,score:x.confidence,confidence:x.confidence})),distanceKm:hav(cur,pick),confidence:ranked[0].confidence};ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x!==pick);cur=pick}route.push(start);return{route,decisions:ds}}
-async function aiDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],model:string,settings:Settings):Promise<{ranked:{city:Capital;confidence:number}[]}>{
-  const res=await fetch("/api/ai-engine",{method:"POST",headers:aiHeaders(settings),body:JSON.stringify({step,current,candidates:cs,remaining:rem,model})});
+async function aiDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],model:string,settings:Settings):Promise<{selected:Capital}>{
+  const res=await fetch("/api/ai-engine",{method:"POST",headers:aiHeaders(),body:JSON.stringify({step,current,candidates:cs,remaining:rem,model})});
   const data=await res.json();
   if(!res.ok||data.error)throw new Error(data.error||"AI engine request failed ("+res.status+")");
-  const byIso=new Map(cs.map(c=>[c.iso2,c]));
-  const ranked=(data.ranked as {iso2:string;confidence:number}[]).map(r=>({city:byIso.get(r.iso2)!,confidence:r.confidence})).filter(x=>x.city);
-  if(!ranked.length)throw new Error("AI engine response did not match any candidate");
-  return{ranked};
+  const selected=cs.find(c=>c.iso2===data.selectedIso2);
+  if(!selected)throw new Error("AI engine returned an invalid candidate selection");
+  return{selected};
 }
-async function aiEngine(c:Capital[],start:Capital=HOME,model:string,settings:Settings=EMPTY_SETTINGS,onStep?:(d:Decision,routeSoFar:Capital[])=>void){let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;while(rem.length){if(ds.length>=maxSteps)throw new Error("AI Engine loop exceeded expected step count ("+maxSteps+") — aborting to avoid runaway API calls");const cs=candidates(cur,rem,route.length*19);const{ranked}=await aiDecide(route.length,cur,cs,rem,model,settings);const pick=ranked[0].city;const d={step:route.length,from:cur,selected:pick,candidates:ranked.map(x=>({city:x.city,score:x.confidence,confidence:x.confidence})),distanceKm:hav(cur,pick),confidence:ranked[0].confidence};ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x!==pick);cur=pick}route.push(start);return{route,decisions:ds}}
+async function aiEngine(c:Capital[],start:Capital=HOME,model:string,settings:Settings=EMPTY_SETTINGS,onStep?:(d:Decision,routeSoFar:Capital[])=>void){let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;while(rem.length){if(ds.length>=maxSteps)throw new Error("AI Engine loop exceeded expected step count ("+maxSteps+") — aborting to avoid runaway API calls");const cs=candidates(cur,rem,route.length*19);const{selected}=await aiDecide(route.length,cur,cs,rem,model,settings);const pick=selected;const d={step:route.length,from:cur,selected:pick,candidates:cs.map(city=>({city,score:city.iso2===pick.iso2?1:0})),distanceKm:hav(cur,pick)};ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x!==pick);cur=pick}route.push(start);return{route,decisions:ds}}
 async function load():Promise<Capital[]>{const r=await fetch("https://raw.githubusercontent.com/Stefie/geojson-world/master/capitals.geojson");if(!r.ok)throw Error("Capital dataset unavailable");const j=await r.json(),m=new Map<string,Capital>();for(const f of j.features||[]){const p=f.properties||{},id=p.iso2||f.id,name=p.city||conventions[id];if(!ISO195.has(id)||!name||!f.geometry?.coordinates)continue;m.set(id,{country:p.country,iso2:id,iso3:p.iso3,capital:conventions[id]||name,lon:f.geometry.coordinates[0],lat:f.geometry.coordinates[1],region:"Other"})}for(const id in manual)if(!m.has(id))m.set(id,manual[id]);const ov:Record<string,[number,number]>={LK:[6.9271,79.8612],BO:[-19.0196,-65.2619],ZA:[-25.7479,28.2293],TZ:[-6.163,35.7516],PS:[31.9038,35.2034],IN:[28.6139,77.209]};for(const k in ov)if(m.has(k)){m.get(k)!.lat=ov[k][0];m.get(k)!.lon=ov[k][1]}const out=[...m.values()].sort((a,b)=>a.country.localeCompare(b.country));if(out.length!==195)throw Error("Expected 195 capitals, found "+out.length);return out}
 
 const AI_MODELS=["openai/gpt-4o-mini","google/gemini-2.0-flash-001","anthropic/claude-3.5-haiku","meta-llama/llama-3.1-8b-instruct","qwen/qwen-2.5-72b-instruct"];
@@ -66,7 +65,7 @@ function BenchCard({algorithm,route,decisions,distanceKm,runtimeMs,live}:{algori
   </div>;
 }
 export default function Home(){const[cities,setCities]=useState<Capital[]>([]),[err,setErr]=useState(""),[result,setResult]=useState<Result|null>(null),[bench,setBench]=useState<Result[]>([]),[step,setStep]=useState(0),[speed,setSpeed]=useState(1),[algorithm,setAlgorithm]=useState("JEV Demo + 2-opt"),[region,setRegion]=useState("All"),[showCandidates,setShowCandidates]=useState(true),[running,setRunning]=useState(false),[providerMode,setProviderMode]=useState<"demo"|"live">("demo"),[aiConfigured,setAiConfigured]=useState(false),[aiModel,setAiModel]=useState(AI_MODELS[0]),[benchModels,setBenchModels]=useState<string[]>([AI_MODELS[0]]),[benchAlgos,setBenchAlgos]=useState<string[]>([...BASE_ALGOS]),[benchLive,setBenchLive]=useState<{algorithm:string;route:Capital[];decisions:Decision[]}|null>(null),[textMode,setTextMode]=useState(false),[log,setLog]=useState<LogEntry[]>([]),[startIso,setStartIso]=useState("HOME"),[settings,setSettings]=useState<Settings>(EMPTY_SETTINGS),[settingsDraft,setSettingsDraft]=useState<Settings>(EMPTY_SETTINGS),[settingsSaved,setSettingsSaved]=useState(false),busyRef=useRef(false),logEndRef=useRef<HTMLDivElement>(null),routeEndRef=useRef<HTMLDivElement>(null);
-function checkProviders(s:Settings){fetch("/api/jev",{headers:jevHeaders(s)}).then(r=>r.json()).then(d=>setProviderMode(d.configured?"live":"demo")).catch(()=>{});fetch("/api/ai-engine",{headers:aiHeaders(s)}).then(r=>r.json()).then(d=>setAiConfigured(!!d.configured)).catch(()=>{})}
+function checkProviders(s:Settings){fetch("/api/jev",{headers:jevHeaders()}).then(r=>r.json()).then(d=>setProviderMode(d.configured?"live":"demo")).catch(()=>{});fetch("/api/ai-engine",{headers:aiHeaders()}).then(r=>r.json()).then(d=>setAiConfigured(!!d.configured)).catch(()=>{})}
 function saveSettings(next:Settings){setSettings(next);try{localStorage.setItem(SETTINGS_KEY,JSON.stringify(next))}catch{}checkProviders(next);setSettingsSaved(true);setTimeout(()=>setSettingsSaved(false),2000)}
 useEffect(()=>{let s=EMPTY_SETTINGS;try{const raw=localStorage.getItem(SETTINGS_KEY);if(raw)s={...EMPTY_SETTINGS,...JSON.parse(raw)}}catch{}setSettings(s);setSettingsDraft(s);load().then(setCities).catch(e=>setErr(e.message));checkProviders(s)},[]);
 useEffect(()=>{if(textMode)logEndRef.current?.scrollIntoView({block:"end"})},[log,textMode]);

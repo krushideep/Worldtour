@@ -1,36 +1,352 @@
 "use client";
-import {useEffect,useMemo,useState} from "react";
+import {useEffect,useMemo,useRef,useState} from "react";
 import {geoNaturalEarth1,geoPath} from "d3-geo";
 import {feature} from "topojson-client";
-// @ts-expect-error
 import world from "world-atlas/countries-110m.json";
 
 type Capital={country:string;iso2:string;iso3:string;capital:string;lat:number;lon:number;region:string};
-type Decision={step:number;from:Capital;selected:Capital;candidates:{city:Capital;score:number;confidence:number}[];distanceKm:number;confidence:number};
+type CommunicationTrace={provider:string;model?:string;request?:unknown;response?:unknown;latencyMs?:number};
+type Decision={step:number;from:Capital;selected:Capital;candidates:{city:Capital;score:number;confidence?:number}[];distanceKm:number;confidence?:number;oracleIso2?:string;regretKm?:number;latencyMs?:number;strategy?:string;communication?:CommunicationTrace};
 type Result={algorithm:string;route:Capital[];distanceKm:number;runtimeMs:number;decisions:Decision[]};
+type LogEntry={step:number;from:string;to:string;km:number;pct?:number;candidates?:string;communication?:CommunicationTrace}|{note:string;communication?:CommunicationTrace};
+type Settings={};
+type JEVMode="geographic"|"distance"|"matrix";
+const EMPTY_SETTINGS:Settings={};
+const SETTINGS_KEY="worldtour_settings";
+function jevHeaders(){return {"content-type":"application/json"}}
+function aiHeaders(){return {"content-type":"application/json"}}
+function copilotHeaders(){return {"content-type":"application/json"}}
+function claudeCliHeaders(){return {"content-type":"application/json"}}
 
-const START:Capital={country:"India",iso2:"IN",iso3:"IND",capital:"Bengaluru",lat:12.9716,lon:77.5946,region:"Asia"};
+const HOME:Capital={country:"India",iso2:"HOME",iso3:"HOME",capital:"Bengaluru",lat:12.9716,lon:77.5946,region:"Asia"};
 const ISO195=new Set("AF AL DZ AD AO AG AR AM AU AT AZ BS BH BD BB BY BE BZ BJ BT BO BA BW BR BN BG BF BI CV KH CM CA CF TD CL CN CO KM CG CD CR CI HR CU CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FJ FI FR GA GM GE DE GH GR GD GT GN GW GY HT HN HU IS IN ID IR IQ IE IL IT JM JP JO KZ KE KI KP KR KW KG LA LV LB LS LR LY LI LT LU MG MW MY MV ML MT MH MR MU MX FM MD MC MN ME MA MZ MM NA NR NP NL NZ NI NE NG MK NO OM PK PW PA PG PY PE PH PL PT QA RO RU RW KN LC VC WS SM ST SA SN RS SC SL SG SK SI SB SO ZA SS ES LK SD SR SE CH SY TJ TZ TH TL TG TO TT TN TR TM TV UG UA AE GB US UY UZ VU VA VE VN YE ZM ZW PS".split(" "));
-const conventions:Record<string,string>={BO:"Sucre",LK:"Sri Jayawardenepura Kotte",ZA:"Pretoria",TZ:"Dodoma",PS:"Ramallah"};
+const conventions:Record<string,string>={BO:"Sucre",LK:"Sri Jayawardenepura Kotte",ZA:"Pretoria",TZ:"Dodoma",PS:"Ramallah",NR:"Yaren"};
+const manual:Record<string,Capital>={SS:{country:"South Sudan",iso2:"SS",iso3:"SSD",capital:"Juba",lat:4.8594,lon:31.5713,region:"Other"}};
 function hav(a:Capital,b:Capital){const r=6371.0088,p=Math.PI/180,d1=(b.lat-a.lat)*p,d2=(b.lon-a.lon)*p,x=Math.sin(d1/2)**2+Math.cos(a.lat*p)*Math.cos(b.lat*p)*Math.sin(d2/2)**2;return 2*r*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function dist(r:Capital[]){let d=0;for(let i=0;i<r.length-1;i++)d+=hav(r[i],r[i+1]);return d}
 function rng(seed:number){return()=>{let t=seed+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296}}
-function randomRoute(c:Capital[],seed=20260919){const a=[...c],r=rng(seed);for(let i=a.length-1;i;i--){const j=Math.floor(r()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return[START,...a,START]}
-function nearest(c:Capital[]){const a=[...c],out=[START];let cur=START;while(a.length){let bi=0,bd=Infinity;for(let i=0;i<a.length;i++){const d=hav(cur,a[i]);if(d<bd){bd=d;bi=i}}cur=a.splice(bi,1)[0];out.push(cur)}out.push(START);return out}
+function randomRoute(c:Capital[],start:Capital=HOME,seed=20260919){const a=[...c],r=rng(seed);for(let i=a.length-1;i;i--){const j=Math.floor(r()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return[start,...a,start]}
+function nearest(c:Capital[],start:Capital=HOME){const a=[...c],out=[start];let cur=start;while(a.length){let bi=0,bd=Infinity;for(let i=0;i<a.length;i++){const d=hav(cur,a[i]);if(d<bd){bd=d;bi=i}}cur=a.splice(bi,1)[0];out.push(cur)}out.push(start);return out}
 function twoOpt(route:Capital[]){const o=[...route];let improved=true,loops=0;while(improved&&loops++<1000){improved=false;for(let i=1;i<o.length-3;i++)for(let j=i+1;j<o.length-1;j++){const old=hav(o[i-1],o[i])+hav(o[j],o[j+1]),neu=hav(o[i-1],o[j])+hav(o[i],o[j+1]);if(neu<old-1e-7){o.splice(i,j-i+1,...o.slice(i,j+1).reverse());improved=true}}}return o}
-function candidates(cur:Capital,rem:Capital[],seed:number){const a=[...rem].sort((x,y)=>hav(cur,x)-hav(cur,y));const p=a.slice(0,3);p.push(...rem.filter(x=>x.region===cur.region&&!p.includes(x)).slice(0,2));const far=[...rem].sort((x,y)=>hav(cur,y)-hav(cur,x));if(far[0])p.push(far[Math.floor(rng(seed)()*Math.min(5,far.length))]);while(p.length<8&&rem.length){const x=rem[Math.floor(rng(seed+p.length)()*rem.length)];if(!p.includes(x))p.push(x)}return p.slice(0,8)}
-function jev(c:Capital[]){let cur=START,rem=[...c],route=[START],ds:Decision[]=[];while(rem.length){const cs=candidates(cur,rem,route.length*19);const ranked=cs.map(x=>{const local=hav(cur,x),rest=rem.filter(y=>y!==x),future=rest.length?Math.min(...rest.map(y=>hav(x,y))):0,s=1/(1+local/2500)+.35/(1+future/1800)+.12*(x.region===cur.region?1:0);return{city:x,score:s,confidence:s}}).sort((a,b)=>b.score-a.score);const max=ranked[0].score;const norm=ranked.map(x=>({...x,confidence:Math.min(.99,Math.max(.35,.08+.92*x.score/max))}));const pick=norm[0].city;ds.push({step:route.length,from:cur,selected:pick,candidates:norm,distanceKm:hav(cur,pick),confidence:norm[0].confidence});route.push(pick);rem=rem.filter(x=>x!==pick);cur=pick}route.push(START);return{route,decisions:ds}}
-async function load():Promise<Capital[]>{const r=await fetch("https://raw.githubusercontent.com/Stefie/geojson-world/master/capitals.geojson");if(!r.ok)throw Error("Capital dataset unavailable");const j=await r.json(),m=new Map<string,Capital>();for(const f of j.features||[]){const p=f.properties||{},id=p.iso2||f.id;if(!ISO195.has(id)||!p.city||!f.geometry?.coordinates)continue;m.set(id,{country:p.country,iso2:id,iso3:p.iso3,capital:conventions[id]||p.city,lon:f.geometry.coordinates[0],lat:f.geometry.coordinates[1],region:"Other"})}const ov:Record<string,[number,number]>={LK:[6.9271,79.8612],BO:[-19.0196,-65.2619],ZA:[-25.7479,28.2293],TZ:[-6.163,35.7516],PS:[31.9038,35.2034],IN:[28.6139,77.209]};for(const k in ov)if(m.has(k)){m.get(k)!.lat=ov[k][0];m.get(k)!.lon=ov[k][1]}const out=[...m.values()].sort((a,b)=>a.country.localeCompare(b.country));if(out.length!==195)throw Error("Expected 195 capitals, found "+out.length);return out}
+function oracleChoice(cur:Capital,cs:Capital[],rem:Capital[]){const scored=cs.map(c=>{const rest=rem.filter(x=>x.iso2!==c.iso2);const next=rest.length?Math.min(...rest.map(x=>hav(c,x))):0;return{iso2:c.iso2,cost:hav(cur,c)+next}}).sort((a,b)=>a.cost-b.cost);return scored[0]||null}
+function candidates(cur:Capital,rem:Capital[],seed:number){const near=[...rem].sort((x,y)=>hav(cur,x)-hav(cur,y));const p=near.slice(0,4);const far=[...rem].sort((x,y)=>hav(cur,y)-hav(cur,x)).filter(x=>!p.includes(x));p.push(...far.slice(0,2));const pick=rng(seed+97);while(p.length<8&&p.length<rem.length){const x=rem[Math.floor(pick()*rem.length)];if(!p.includes(x))p.push(x)}return p.slice(0,8)}
+function buildDistanceMatrix(all:Capital[]){const m:Record<string,Record<string,number>>={};for(const a of all){m[a.iso2]={};for(const b of all)m[a.iso2][b.iso2]=hav(a,b)}return m}
+function distanceFeatures(current:Capital,cs:Capital[],rem:Capital[],matrix:Record<string,Record<string,number>>){return cs.map(c=>{const rest=rem.filter(x=>x.iso2!==c.iso2);const vals=rest.map(x=>matrix[c.iso2]?.[x.iso2]??hav(c,x));return{iso2:c.iso2,currentKm:matrix[current.iso2]?.[c.iso2]??hav(current,c),nearestFutureKm:vals.length?Math.min(...vals):0,farthestFutureKm:vals.length?Math.max(...vals):0}})}
+async function jevDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],settings:Settings,mode:JEVMode,matrix:Record<string,Record<string,number>>):Promise<{ranked:{city:Capital;confidence:number}[];mode:"demo"|"live";latencyMs?:number;strategy?:string;communication?:CommunicationTrace}>{
+  const started=performance.now();
+  const features=distanceFeatures(current,cs,rem,matrix);
+  const payload={step,current,candidates:cs,remaining:rem,mode,distanceFeatures:features};
+  const res=await fetch("/api/jev",{method:"POST",headers:jevHeaders(),body:JSON.stringify(payload)});
+  const data=await res.json();
+  if(!res.ok||data.error)throw new Error(data.error||"JEV request failed ("+res.status+")");
+  const byIso=new Map(cs.map(c=>[c.iso2,c]));
+  const raw=(data.ranked as {iso2:string;confidence:number}[]).map(r=>({city:byIso.get(r.iso2)!,confidence:r.confidence})).filter(x=>x.city);
+  if(!raw.length)throw new Error("JEV response did not match any candidate");
+  const ranked=[...raw].sort((a,b)=>b.confidence-a.confidence);
+  return{ranked,mode:data.mode as "demo"|"live",latencyMs:data.latencyMs??(performance.now()-started),strategy:data.strategy,communication:data.communication};
+}
+async function jev(c:Capital[],start:Capital=HOME,settings:Settings=EMPTY_SETTINGS,mode:JEVMode="geographic",matrix:Record<string,Record<string,number>>={},onMode?:(m:"demo"|"live")=>void,onStep?:(d:Decision,routeSoFar:Capital[])=>void){let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;while(rem.length){if(ds.length>=maxSteps)throw new Error("JEV loop exceeded expected step count ("+maxSteps+") — aborting to avoid runaway API calls");const cs=candidates(cur,rem,route.length*19);const{ranked,mode:providerMode,latencyMs,strategy,communication}=await jevDecide(route.length,cur,cs,rem,settings,mode,matrix);onMode?.(providerMode);const pick=ranked[0].city;const oracle=oracleChoice(cur,cs,rem);const chosenCost=oracle?oracle.cost:0;const selectedCost=hav(cur,pick)+(rem.length>1?Math.min(...rem.filter(x=>x.iso2!==pick.iso2).map(x=>hav(pick,x))):0);const d={step:route.length,from:cur,selected:pick,candidates:ranked.map(x=>({city:x.city,score:x.confidence,confidence:x.confidence})),distanceKm:hav(cur,pick),confidence:ranked[0].confidence,oracleIso2:oracle?.iso2,regretKm:Math.max(0,selectedCost-chosenCost),latencyMs,strategy,communication};ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x!==pick);cur=pick}route.push(start);return{route,decisions:ds}}
+function kmeans<T extends{lat:number;lon:number}>(points:T[],k:number,seed:number):T[][]{
+  const r=rng(seed),n=Math.min(k,points.length),idxs=new Set<number>();
+  while(idxs.size<n)idxs.add(Math.floor(r()*points.length));
+  const toVec=(p:T)=>{const lat=p.lat*Math.PI/180,lon=p.lon*Math.PI/180,cl=Math.cos(lat);return{x:cl*Math.cos(lon),y:cl*Math.sin(lon),z:Math.sin(lat)}};
+  let centroids=[...idxs].map(i=>toVec(points[i]));
+  let assign=new Array(points.length).fill(0);
+  for(let iter=0;iter<20;iter++){
+    for(let i=0;i<points.length;i++){
+      const v=toVec(points[i]);let best=0,bestScore=-Infinity;
+      for(let c=0;c<centroids.length;c++){const score=v.x*centroids[c].x+v.y*centroids[c].y+v.z*centroids[c].z;if(score>bestScore){bestScore=score;best=c}}
+      assign[i]=best;
+    }
+    const sums=centroids.map(()=>({x:0,y:0,z:0,n:0}));
+    for(let i=0;i<points.length;i++){const c=assign[i],v=toVec(points[i]);sums[c].x+=v.x;sums[c].y+=v.y;sums[c].z+=v.z;sums[c].n++}
+    centroids=sums.map((v,c)=>v.n?{x:v.x/v.n,y:v.y/v.n,z:v.z/v.n}:centroids[c]);
+  }
+  const groups=centroids.map(()=>[] as number[]);
+  for(let i=0;i<points.length;i++)groups[assign[i]].push(i);
+  return groups.map(idx=>idx.map(i=>points[i])).filter(g=>g.length);
+}
+function sphericalCentroid(points:Capital[]){
+  let x=0,y=0,z=0;
+  for(const p of points){const lat=p.lat*Math.PI/180,lon=p.lon*Math.PI/180,cl=Math.cos(lat);x+=cl*Math.cos(lon);y+=cl*Math.sin(lon);z+=Math.sin(lat)}
+  const norm=Math.hypot(x,y,z)||1;
+  return{lat:Math.asin(z/norm)*180/Math.PI,lon:Math.atan2(y,x)*180/Math.PI};
+}
+function buildClusterNodes(cities:Capital[],k:number,seed=20260919):{node:Capital;members:Capital[]}[]{
+  const groups=kmeans(cities,k,seed);
+  return groups.map((members,i)=>{
+    const {lat,lon}=sphericalCentroid(members);
+    return{node:{country:"",iso2:`CL${String(i+1).padStart(2,"0")}`,iso3:"",capital:`Region ${i+1} · ${members.length} capitals`,lat,lon,region:"cluster"} as Capital,members};
+  });
+}
+async function jevClustered(cities:Capital[],start:Capital,settings:Settings,mode:JEVMode,onMode?:(m:"demo"|"live")=>void,onClusterStep?:(d:Decision,routeSoFar:Capital[])=>void,k=24){
+  const clusterDefs=buildClusterNodes(cities,k);
+  const clusterNodes=clusterDefs.map(c=>c.node);
+  const clusterMatrix=buildDistanceMatrix([start,...clusterNodes]);
+  const byIso2=new Map(clusterDefs.map(c=>[c.node.iso2,c]));
+  let cur=start;const route:Capital[]=[start];const decisions:Decision[]=[];
+  const onInnerStep=(d:Decision,_clusterRouteSoFar:Capital[])=>{
+    const def=byIso2.get(d.selected.iso2)!;
+    const ordered=nearest(def.members,cur).slice(1,-1);
+    route.push(...ordered);
+    cur=ordered[ordered.length-1]||cur;
+    const mapped:Decision={...d,step:route.length-1,oracleIso2:undefined,regretKm:undefined,strategy:d.strategy?`cluster:${d.strategy}`:"cluster"};
+    decisions.push(mapped);
+    onClusterStep?.(mapped,[...route]);
+  };
+  await jev(clusterNodes,start,settings,mode,clusterMatrix,onMode,onInnerStep);
+  route.push(start);
+  return{route,decisions,clusterCount:clusterDefs.length};
+}
+async function aiDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],model:string,settings:Settings):Promise<{selected:Capital;communication?:CommunicationTrace}>{
+  const res=await fetch("/api/ai-engine",{method:"POST",headers:aiHeaders(),body:JSON.stringify({step,current,candidates:cs,remaining:rem,model})});
+  const data=await res.json();
+  if(!res.ok||data.error)throw new Error(data.error||"AI engine request failed ("+res.status+")");
+  const selected=cs.find(c=>c.iso2===data.selectedIso2);
+  if(!selected)throw new Error("AI engine returned an invalid candidate selection");
+  return{selected};
+}
+async function aiEngine(c:Capital[],start:Capital=HOME,model:string,settings:Settings=EMPTY_SETTINGS,onStep?:(d:Decision,routeSoFar:Capital[])=>void){let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;while(rem.length){if(ds.length>=maxSteps)throw new Error("AI Engine loop exceeded expected step count ("+maxSteps+") — aborting to avoid runaway API calls");const cs=candidates(cur,rem,route.length*19);const{selected,communication}=await aiDecide(route.length,cur,cs,rem,model,settings);const pick=selected;const d={step:route.length,from:cur,selected:pick,candidates:cs.map(city=>({city,score:city.iso2===pick.iso2?1:0})),distanceKm:hav(cur,pick),communication};ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x!==pick);cur=pick}route.push(start);return{route,decisions:ds}}
+async function copilotDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],model:string):Promise<{selected:Capital;latencyMs:number;communication?:CommunicationTrace}>{
+  const started=performance.now();
+  const res=await fetch("/api/copilot",{method:"POST",headers:copilotHeaders(),body:JSON.stringify({
+    step,current:{iso2:current.iso2,capital:current.capital},remainingCount:rem.length,
+    candidates:cs.map(c=>({iso2:c.iso2,capital:c.capital,distanceKm:Math.round(hav(current,c))})),model
+  })});
+  const data=await res.json();
+  if(!res.ok||data.error)throw new Error(data.error||"Copilot request failed ("+res.status+")");
+  const selected=cs.find(c=>c.iso2===data.selectedIso2);
+  if(!selected)throw new Error("Copilot returned an invalid candidate selection");
+  return{selected,latencyMs:data.latencyMs??(performance.now()-started),communication:data.communication};
+}
+async function copilotEngine(c:Capital[],start:Capital,model:string,onStep?:(d:Decision,routeSoFar:Capital[])=>void){
+  let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;
+  while(rem.length){
+    if(ds.length>=maxSteps)throw new Error("Copilot loop exceeded expected step count ("+maxSteps+")");
+    const cs=candidates(cur,rem,route.length*19);
+    const{selected,latencyMs,communication}=await copilotDecide(route.length,cur,cs,rem,model);
+    const pick=selected;
+    const d:Decision={step:route.length,from:cur,selected:pick,candidates:cs.map(city=>({city,score:city.iso2===pick.iso2?1:0})),distanceKm:hav(cur,pick),latencyMs,communication};
+    ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x.iso2!==pick.iso2);cur=pick;
+  }
+  route.push(start);return{route,decisions:ds};
+}
+async function claudeCliDecide(step:number,current:Capital,cs:Capital[],rem:Capital[],model:string):Promise<{selected:Capital;latencyMs:number;communication?:CommunicationTrace}>{
+  const started=performance.now();
+  const res=await fetch("/api/claude-cli",{method:"POST",headers:claudeCliHeaders(),body:JSON.stringify({
+    step,current:{iso2:current.iso2,capital:current.capital},remainingCount:rem.length,
+    candidates:cs.map(c=>({iso2:c.iso2,capital:c.capital,distanceKm:Math.round(hav(current,c))})),model
+  })});
+  const data=await res.json();
+  if(!res.ok||data.error)throw new Error(data.error||"Claude CLI request failed ("+res.status+")");
+  const selected=cs.find(c=>c.iso2===data.selectedIso2);
+  if(!selected)throw new Error("Claude CLI returned an invalid candidate selection");
+  return{selected,latencyMs:data.latencyMs??(performance.now()-started),communication:data.communication};
+}
+async function claudeCliEngine(c:Capital[],start:Capital,model:string,onStep?:(d:Decision,routeSoFar:Capital[])=>void){
+  let cur=start,rem=[...c],route=[start],ds:Decision[]=[];const maxSteps=c.length;
+  while(rem.length){
+    if(ds.length>=maxSteps)throw new Error("Claude CLI loop exceeded expected step count ("+maxSteps+")");
+    const cs=candidates(cur,rem,route.length*19);
+    const{selected,latencyMs,communication}=await claudeCliDecide(route.length,cur,cs,rem,model);
+    const pick=selected;
+    const d:Decision={step:route.length,from:cur,selected:pick,candidates:cs.map(city=>({city,score:city.iso2===pick.iso2?1:0})),distanceKm:hav(cur,pick),latencyMs,communication};
+    ds.push(d);route.push(pick);onStep?.(d,[...route]);rem=rem.filter(x=>x.iso2!==pick.iso2);cur=pick;
+  }
+  route.push(start);return{route,decisions:ds};
+}
+async function claudeFullProblem(cities:Capital[],start:Capital,model:string):Promise<{route:Capital[];latencyMs:number;communication?:CommunicationTrace}>{
+  const res=await fetch("/api/claude-full",{method:"POST",headers:claudeCliHeaders(),body:JSON.stringify({start,capitals:cities,model})});
+  const data=await res.json();
+  if(!res.ok||data.error)throw new Error(data.error||"Claude Full Problem request failed ("+res.status+")");
+  const byIso=new Map([...cities,start].map(c=>[c.iso2,c]));
+  const route=(data.routeIso2 as string[]).map(iso=>byIso.get(iso)).filter((c):c is Capital=>!!c);
+  if(route.length!==196||route[0]?.iso2!==start.iso2||route[route.length-1]?.iso2!==start.iso2)throw new Error("Claude Full Problem returned an invalid route");
+  return{route,latencyMs:data.latencyMs,communication:data.communication};
+}
 
-export default function Home(){const[cities,setCities]=useState<Capital[]>([]),[err,setErr]=useState(""),[result,setResult]=useState<Result|null>(null),[bench,setBench]=useState<Result[]>([]),[step,setStep]=useState(0),[speed,setSpeed]=useState(1),[algorithm,setAlgorithm]=useState("JEV Demo + 2-opt"),[region,setRegion]=useState("All"),[showCandidates,setShowCandidates]=useState(true),[running,setRunning]=useState(false);useEffect(()=>{load().then(setCities).catch(e=>setErr(e.message))},[]);
-const features=useMemo(()=>feature(world as any,(world as any).objects.countries) as any,[]),projection=useMemo(()=>geoNaturalEarth1().fitSize([1000,510],features),[features]),path=useMemo(()=>geoPath(projection),[projection]);const route=result?.route||[],visible=running?route.slice(0,Math.max(1,step+1)):route,current=visible[visible.length-1]||START,decision=result?.decisions.find(x=>x.step===step),filtered=cities.filter(x=>region==="All"||x.region===region),line=visible.map(x=>projection([x.lon,x.lat])?.join(",")).filter(Boolean).join(" ");
-function run(){if(!cities.length)return;let r:Result;const t=performance.now();if(algorithm==="Random"){const x=randomRoute(cities);r={algorithm,route:x,distanceKm:dist(x),runtimeMs:performance.now()-t,decisions:[]}}else if(algorithm==="Nearest Neighbor"){const x=nearest(cities);r={algorithm,route:x,distanceKm:dist(x),runtimeMs:performance.now()-t,decisions:[]}}else if(algorithm==="NN + 2-opt"){const x=twoOpt(nearest(cities));r={algorithm,route:x,distanceKm:dist(x),runtimeMs:performance.now()-t,decisions:[]}}else{const j=jev(cities),x=algorithm==="JEV Demo + 2-opt"?twoOpt(j.route):j.route;r={algorithm,route:x,distanceKm:dist(x),runtimeMs:performance.now()-t,decisions:j.decisions}}setResult(r);setStep(0);setRunning(true);(async()=>{for(let i=1;i<r.route.length;i++){await new Promise(x=>setTimeout(x,Math.max(8,180/speed)));setStep(i)}setRunning(false)})()}
-function benchmark(){if(!cities.length)return;const t=(fn:()=>Result)=>{const s=performance.now(),r=fn();r.runtimeMs=performance.now()-s;return r};const n=nearest(cities),j=jev(cities),a=[t(()=>({algorithm:"Random",route:randomRoute(cities),distanceKm:0,runtimeMs:0,decisions:[]})),t(()=>({algorithm:"Nearest Neighbor",route:n,distanceKm:dist(n),runtimeMs:0,decisions:[]})),t(()=>{const x=twoOpt(n);return{algorithm:"NN + 2-opt",route:x,distanceKm:dist(x),runtimeMs:0,decisions:[]}}),t(()=>({algorithm:"JEV Demo",route:j.route,distanceKm:dist(j.route),runtimeMs:0,decisions:j.decisions})),t(()=>{const x=twoOpt(j.route);return{algorithm:"JEV Demo + 2-opt",route:x,distanceKm:dist(x),runtimeMs:0,decisions:j.decisions}})];a[0].distanceKm=dist(a[0].route);setBench(a)}
+async function load():Promise<Capital[]>{const r=await fetch("https://raw.githubusercontent.com/Stefie/geojson-world/46cbac88be743326b247baee180928683d0afe9f/capitals.geojson");if(!r.ok)throw Error("Capital dataset unavailable");const j=await r.json(),m=new Map<string,Capital>();for(const f of j.features||[]){const p=f.properties||{},id=p.iso2||f.id,name=p.city||conventions[id];if(!ISO195.has(id)||!name||!f.geometry?.coordinates)continue;m.set(id,{country:p.country,iso2:id,iso3:p.iso3,capital:conventions[id]||name,lon:f.geometry.coordinates[0],lat:f.geometry.coordinates[1],region:"Other"})}for(const id in manual)if(!m.has(id))m.set(id,manual[id]);const ov:Record<string,[number,number]>={LK:[6.9271,79.8612],BO:[-19.0196,-65.2619],ZA:[-25.7479,28.2293],TZ:[-6.163,35.7516],PS:[31.9038,35.2034],IN:[28.6139,77.209]};for(const k in ov)if(m.has(k)){m.get(k)!.lat=ov[k][0];m.get(k)!.lon=ov[k][1]}const out=[...m.values()].sort((a,b)=>a.country.localeCompare(b.country));if(out.length!==195)throw Error("Expected 195 capitals, found "+out.length);return out}
+
+const AI_MODELS=["openai/gpt-4o-mini","google/gemini-2.0-flash-001","anthropic/claude-3.5-haiku","meta-llama/llama-3.1-8b-instruct","qwen/qwen-2.5-72b-instruct"];
+const BASE_ALGOS=["Random","Nearest Neighbor","NN + 2-opt","JEV","JEV + 2-opt","JEV Distance","JEV Distance + 2-opt","JEV Matrix","JEV Matrix + 2-opt","JEV Clustered","JEV Clustered + 2-opt","Claude Full Problem"];
+function pad(n:number){return String(n).padStart(3,"0")}
+function decisionLine(d:Decision){return `${pad(d.step)}  ${d.from.capital} → ${d.selected.capital}   ${d.distanceKm.toFixed(0)} km   ${d.confidence!=null?Math.round(d.confidence*100)+"%":"—"}`}
+function DecisionMini({d}:{d?:Decision}){
+  if(!d)return <span className="empty">—</span>;
+  return <div className="benchDecision"><span>{d.from.capital} → {d.selected.capital}</span><i>{Math.round(d.confidence*100)}%</i></div>;
+}
+function BenchCard({algorithm,route,decisions,distanceKm,runtimeMs,live,error}:{algorithm:string;route:Capital[];decisions:Decision[];distanceKm:number;runtimeMs:number;live?:boolean;error?:string}){
+  return <div className={live?"benchCard live":error?"benchCard failed":"benchCard"}>
+    <div className="benchCardHead"><b>{algorithm}</b><span className={live?"runTag":error?"errorTag":"doneTag"}>{live?"RUNNING":error?"FAILED":"DONE"}</span><strong>{error?"—":distanceKm?distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><small>{live?(algorithm.includes("Clustered")?decisions.length+"/24 regions":decisions.length+"/195 decisions"):error?"stopped":(runtimeMs/1000).toFixed(1)+" s"}</small></div>
+    {error?<div className="benchError">{error}</div>:<div className="benchCardBody">
+      <div className="benchMini"><b>LIVE OUTPUT</b><div className="benchLog">{decisions.length?decisions.slice(-30).map((d,i)=><div key={i}>{decisionLine(d)}</div>):<span className="empty">—</span>}</div></div>
+      <div className="benchMini"><b>DECISION</b><DecisionMini d={decisions[decisions.length-1]}/></div>
+      <div className="benchMini"><b>ROUTE</b><div className="benchRouteList">{route.slice(-30).map((c,i)=><div key={i}>{c.capital}</div>)}</div></div>
+    </div>}
+  </div>;
+}
+export default function Home(){const[cities,setCities]=useState<Capital[]>([]),[err,setErr]=useState(""),[result,setResult]=useState<Result|null>(null),[bench,setBench]=useState<Result[]>([]),[step,setStep]=useState(0),[speed,setSpeed]=useState(1),[algorithm,setAlgorithm]=useState("JEV + 2-opt"),[region,setRegion]=useState("All"),[showCandidates,setShowCandidates]=useState(true),[running,setRunning]=useState(false),[providerMode,setProviderMode]=useState<"demo"|"live">("demo"),[aiConfigured,setAiConfigured]=useState(false),[aiModel,setAiModel]=useState(AI_MODELS[0]),[copilotConfigured,setCopilotConfigured]=useState(false),[copilotModel,setCopilotModel]=useState("gpt-5.4"),[claudeCliConfigured,setClaudeCliConfigured]=useState(false),[claudeCliModel,setClaudeCliModel]=useState("haiku"),[claudeFullConfigured,setClaudeFullConfigured]=useState(false),[claudeFullModel,setClaudeFullModel]=useState("haiku"),[benchModels,setBenchModels]=useState<string[]>([AI_MODELS[0]]),[benchCopilotModels,setBenchCopilotModels]=useState<string[]>(["gpt-5.4"]),[benchClaudeCliModels,setBenchClaudeCliModels]=useState<string[]>(["haiku"]),[benchAlgos,setBenchAlgos]=useState<string[]>([...BASE_ALGOS]),[benchLive,setBenchLive]=useState<{algorithm:string;route:Capital[];decisions:Decision[]}|null>(null),[textMode,setTextMode]=useState(false),[log,setLog]=useState<LogEntry[]>([]),[startIso,setStartIso]=useState("HOME"),[settings,setSettings]=useState<Settings>(EMPTY_SETTINGS),[settingsDraft,setSettingsDraft]=useState<Settings>(EMPTY_SETTINGS),[settingsSaved,setSettingsSaved]=useState(false),busyRef=useRef(false),logEndRef=useRef<HTMLDivElement>(null),routeEndRef=useRef<HTMLDivElement>(null);
+function checkProviders(s:Settings){fetch("/api/jev",{headers:jevHeaders()}).then(r=>r.json()).then(d=>setProviderMode(d.configured?"live":"demo")).catch(()=>{});fetch("/api/ai-engine",{headers:aiHeaders()}).then(r=>r.json()).then(d=>setAiConfigured(!!d.configured)).catch(()=>{});fetch("/api/copilot",{headers:copilotHeaders()}).then(r=>r.json()).then(d=>{setCopilotConfigured(!!d.configured);if(d.model)setCopilotModel(d.model);if(Array.isArray(d.models)&&d.models.length)setBenchCopilotModels(d.models)}).catch(()=>{});fetch("/api/claude-cli",{headers:claudeCliHeaders()}).then(r=>r.json()).then(d=>{setClaudeCliConfigured(!!d.configured);setClaudeFullConfigured(!!d.configured);if(d.model){setClaudeCliModel(d.model);setClaudeFullModel(d.model)}if(Array.isArray(d.models)&&d.models.length)setBenchClaudeCliModels(d.models)}).catch(()=>{})}
+function saveSettings(next:Settings){setSettings(next);try{localStorage.setItem(SETTINGS_KEY,JSON.stringify(next))}catch{}checkProviders(next);setSettingsSaved(true);setTimeout(()=>setSettingsSaved(false),2000)}
+useEffect(()=>{let s=EMPTY_SETTINGS;try{const raw=localStorage.getItem(SETTINGS_KEY);if(raw)s={...EMPTY_SETTINGS,...JSON.parse(raw)}}catch{}setSettings(s);setSettingsDraft(s);load().then(setCities).catch(e=>setErr(e.message));checkProviders(s)},[]);
+useEffect(()=>{if(textMode)logEndRef.current?.scrollIntoView({block:"end"})},[log,textMode]);
+useEffect(()=>{if(running)routeEndRef.current?.scrollIntoView({block:"end"})},[step,running]);
+function pushLog(entry:LogEntry){setLog(prev=>prev.length>600?[...prev.slice(-600),entry]:[...prev,entry])}
+const startCity=startIso==="HOME"?HOME:cities.find(c=>c.iso2===startIso)||HOME,tourCities=startIso==="HOME"?cities:cities.filter(c=>c.iso2!==startIso),startOptions=useMemo(()=>[...cities].sort((a,b)=>a.capital.localeCompare(b.capital)),[cities]);
+const features=useMemo(()=>feature(world as any,(world as any).objects.countries) as any,[]),projection=useMemo(()=>geoNaturalEarth1().fitSize([1000,510],features),[features]),path=useMemo(()=>geoPath(projection),[projection]);const route=result?.route||[],visible=running?route.slice(0,Math.max(1,step+1)):route,current=visible[visible.length-1]||startCity,decision=result?.decisions.find(x=>x.step===step),filtered=cities.filter(x=>region==="All"||x.region===region),line=visible.map(x=>projection([x.lon,x.lat])?.join(",")).filter(Boolean).join(" ");
+async function run(){if(!cities.length||busyRef.current)return;busyRef.current=true;setRunning(true);setLog([]);const t=performance.now();
+  try{
+    const isJevLike=algorithm.startsWith("JEV")&&!algorithm.startsWith("JEV Clustered"),isAiLike=algorithm==="AI Engine"||algorithm==="AI Engine + 2-opt",isCopilotLike=algorithm==="Copilot"||algorithm==="Copilot + 2-opt",isClaudeCliLike=algorithm==="Claude CLI"||algorithm==="Claude CLI + 2-opt",isClaudeFull=algorithm==="Claude Full Problem",isJevClustered=algorithm==="JEV Clustered"||algorithm==="JEV Clustered + 2-opt";
+    if(isJevClustered){
+      setResult({algorithm,route:[startCity],distanceKm:0,runtimeMs:0,decisions:[]});setStep(0);
+      pushLog({note:"JEV Clustered · grouping "+tourCities.length+" capitals into ~24 regions · sequencing regions via JEV, ordering within each region locally"});
+      const onClusterStep=(d:Decision,routeSoFar:Capital[])=>{
+        setStep(d.step);
+        setResult(prev=>prev?{...prev,route:routeSoFar,distanceKm:dist(routeSoFar),runtimeMs:performance.now()-t,decisions:[...prev.decisions,d]}:prev);
+        pushLog({step:d.step,from:d.from.capital,to:d.selected.capital,km:d.distanceKm,pct:d.confidence!=null?Math.round(d.confidence*100):undefined,candidates:d.candidates.map(x=>x.city.capital).join(", "),communication:d.communication});
+      };
+      const clustered=await jevClustered(tourCities,startCity,settings,"geographic",setProviderMode,onClusterStep,24);
+      const wantsTwoOpt=algorithm.endsWith("2-opt");
+      if(wantsTwoOpt)pushLog({note:`running 2-opt refinement on the ${dist(clustered.route).toFixed(0)} km clustered route`});
+      const x=wantsTwoOpt?twoOpt(clustered.route):clustered.route; const finalDist=dist(x);
+      setResult({algorithm,route:x,distanceKm:finalDist,runtimeMs:performance.now()-t,decisions:clustered.decisions});
+      setStep(x.length-1);
+      pushLog({note:`JEV Clustered done: ${clustered.decisions.length} region decisions, ${x.length-1} legs, ${finalDist.toFixed(0)} km`});
+    }else if(isClaudeFull){
+      setResult({algorithm,route:[startCity],distanceKm:0,runtimeMs:0,decisions:[]});setStep(0);
+      pushLog({note:`Claude Full Problem · one request · start/end ${startCity.capital}`});
+      const full=await claudeFullProblem(cities,startCity,claudeFullModel);
+      setResult({algorithm,route:full.route,distanceKm:dist(full.route),runtimeMs:full.latencyMs,decisions:[]});
+      setStep(full.route.length-1);
+      pushLog({note:`Claude returned a complete 195-capital route in ${(full.latencyMs/1000).toFixed(2)} s · independently measured ${dist(full.route).toFixed(0)} km`,communication:full.communication});
+    }else if(isJevLike||isAiLike||isCopilotLike||isClaudeCliLike){
+      setResult({algorithm,route:[startCity],distanceKm:0,runtimeMs:0,decisions:[]});setStep(0);
+      let cumulative=0;
+      const onStep=(d:Decision,routeSoFar:Capital[])=>{
+        cumulative+=d.distanceKm;
+        setStep(d.step);
+        setResult(prev=>prev?{...prev,route:routeSoFar,distanceKm:cumulative,runtimeMs:performance.now()-t,decisions:[...prev.decisions,d]}:prev);
+        pushLog({step:d.step,from:d.from.capital,to:d.selected.capital,km:d.distanceKm,pct:d.confidence!=null?Math.round(d.confidence*100):undefined,candidates:d.candidates.map(x=>x.city.capital).join(", "),communication:d.communication});
+      };
+      const distanceMatrix=buildDistanceMatrix([startCity,...tourCities]); const jevMode: JEVMode=algorithm.includes("Matrix")?"matrix":algorithm.includes("Distance")?"distance":"geographic"; const j=isAiLike?await aiEngine(tourCities,startCity,aiModel,settings,onStep):isCopilotLike?await copilotEngine(tourCities,startCity,copilotModel,onStep):isClaudeCliLike?await claudeCliEngine(tourCities,startCity,claudeCliModel,onStep):await jev(tourCities,startCity,settings,jevMode,distanceMatrix,setProviderMode,onStep);
+      const wantsTwoOpt=algorithm.endsWith("2-opt");
+      if(wantsTwoOpt)pushLog({note:`running 2-opt refinement on the ${dist(j.route).toFixed(0)} km greedy route`});
+      const x=wantsTwoOpt?twoOpt(j.route):j.route; const finalDist=dist(x);
+      setResult({algorithm,route:x,distanceKm:finalDist,runtimeMs:performance.now()-t,decisions:j.decisions});
+      setStep(x.length-1);
+      if(wantsTwoOpt)pushLog({note:`2-opt refined: ${finalDist.toFixed(0)} km (was ${dist(j.route).toFixed(0)} km)`});
+    }else{
+      const x=algorithm==="Random"?randomRoute(tourCities,startCity):algorithm==="Nearest Neighbor"?nearest(tourCities,startCity):twoOpt(nearest(tourCities,startCity));
+      setResult({algorithm,route:x,distanceKm:dist(x),runtimeMs:performance.now()-t,decisions:[]});setStep(0);
+      for(let i=1;i<x.length;i++){
+        await new Promise(res=>setTimeout(res,Math.max(8,180/speed)));
+        setStep(i);
+        setResult(prev=>prev?{...prev,runtimeMs:performance.now()-t}:prev);
+        pushLog({step:i,from:x[i-1].capital,to:x[i].capital,km:hav(x[i-1],x[i])});
+      }
+    }
+  }catch(e:any){setErr(e?.message||"Request failed");setRunning(false);busyRef.current=false;return}
+  setRunning(false);busyRef.current=false;
+}
+async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.current=true;setRunning(true);setBench([]);setErr("");try{
+  const t=async(fn:()=>Promise<Result>)=>{const s=performance.now(),r=await fn();r.runtimeMs=performance.now()-s;return r};
+  const push=(r:Result)=>setBench(prev=>[...prev,r]);
+  const runCase=async(name:string,fn:()=>Promise<Result>)=>{
+    setBenchLive({algorithm:name,route:[startCity],decisions:[]});
+    try{const r=await t(fn);push(r)}catch(e:any){push({algorithm:name,route:[startCity],distanceKm:0,runtimeMs:0,decisions:[],error:e?.message||"Request failed"} as Result&{error:string})}
+    setBenchLive(null);
+  };
+
+  if(benchAlgos.includes("Random")){
+    push(await t(async()=>{const x=randomRoute(tourCities,startCity);return{algorithm:"Random",route:x,distanceKm:dist(x),runtimeMs:0,decisions:[]}}));
+  }
+
+  if(benchAlgos.includes("Nearest Neighbor")||benchAlgos.includes("NN + 2-opt")){
+    if(benchAlgos.includes("Nearest Neighbor"))push(await t(async()=>{const n=nearest(tourCities,startCity);return{algorithm:"Nearest Neighbor",route:n,distanceKm:dist(n),runtimeMs:0,decisions:[]}}));
+    if(benchAlgos.includes("NN + 2-opt"))push(await t(async()=>{const n=nearest(tourCities,startCity);const x=twoOpt(n);return{algorithm:"NN + 2-opt",route:x,distanceKm:dist(x),runtimeMs:0,decisions:[]}}));
+  }
+
+  if(benchAlgos.includes("JEV")||benchAlgos.includes("JEV + 2-opt")){
+    const distanceMatrix=buildDistanceMatrix([startCity,...tourCities]);
+    for(const alg of ["JEV","JEV + 2-opt"]){
+      if(!benchAlgos.includes(alg))continue;
+      await runCase(alg,async()=>{
+        const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
+        const raw=await jev(tourCities,startCity,settings,"geographic",distanceMatrix,setProviderMode,onStep);
+        const x=alg.endsWith("2-opt")?twoOpt(raw.route):raw.route;
+        return{algorithm:alg,route:x,distanceKm:dist(x),runtimeMs:0,decisions:raw.decisions};
+      });
+    }
+  }
+
+  if(benchAlgos.includes("JEV Clustered")||benchAlgos.includes("JEV Clustered + 2-opt")){
+    for(const alg of ["JEV Clustered","JEV Clustered + 2-opt"]){
+      if(!benchAlgos.includes(alg))continue;
+      await runCase(alg,async()=>{
+        const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
+        const r=await jevClustered(tourCities,startCity,settings,"geographic",setProviderMode,onStep,24);
+        const x=alg.endsWith("2-opt")?twoOpt(r.route):r.route;
+        return{algorithm:alg,route:x,distanceKm:dist(x),runtimeMs:0,decisions:r.decisions};
+      });
+    }
+  }
+
+  if(copilotConfigured){
+    for(const model of benchCopilotModels){
+      for(const optimized of [false,true]){
+        setBenchLive({algorithm:"Copilot: "+model+(optimized?" + 2-opt":""),route:[startCity],decisions:[]});
+        const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
+        const raw=await t(async()=>{const r=await copilotEngine(tourCities,startCity,model,onStep);return{algorithm:"Copilot: "+model,route:r.route,distanceKm:dist(r.route),runtimeMs:0,decisions:r.decisions}});
+        const out=optimized?{...raw,algorithm:"Copilot: "+model+" + 2-opt",route:twoOpt(raw.route),distanceKm:dist(twoOpt(raw.route))}:raw;
+        push(out);
+      }
+    }
+    setBenchLive(null);
+  }
+
+  if(claudeCliConfigured){
+    for(const model of benchClaudeCliModels){
+      for(const optimized of [false,true]){
+        setBenchLive({algorithm:"Claude CLI: "+model+(optimized?" + 2-opt":""),route:[startCity],decisions:[]});
+        const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
+        const raw=await t(async()=>{const r=await claudeCliEngine(tourCities,startCity,model,onStep);return{algorithm:"Claude CLI: "+model,route:r.route,distanceKm:dist(r.route),runtimeMs:0,decisions:r.decisions}});
+        const out=optimized?{...raw,algorithm:"Claude CLI: "+model+" + 2-opt",route:twoOpt(raw.route),distanceKm:dist(twoOpt(raw.route))}:raw;
+        push(out);
+      }
+    }
+    setBenchLive(null);
+  }
+  if(claudeFullConfigured&&benchAlgos.includes("Claude Full Problem")){
+    for(const model of benchClaudeCliModels){
+      setBenchLive({algorithm:"Claude Full Problem: "+model,route:[startCity],decisions:[]});
+      const raw=await t(async()=>{const r=await claudeFullProblem(cities,startCity,model);return{algorithm:"Claude Full Problem: "+model,route:r.route,distanceKm:dist(r.route),runtimeMs:r.latencyMs,decisions:[]}}); 
+      push(raw);
+    }
+    setBenchLive(null);
+  }
+
+  if(aiConfigured){
+    for(const model of benchModels){
+      setBenchLive({algorithm:"AI: "+model,route:[startCity],decisions:[]});
+      const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
+      const ai=await t(async()=>{const r=await aiEngine(tourCities,startCity,model,settings,onStep);return{algorithm:"AI: "+model,route:r.route,distanceKm:dist(r.route),runtimeMs:0,decisions:r.decisions}});
+      push(ai);
+      push(await t(async()=>{const x=twoOpt(ai.route);return{algorithm:"AI: "+model+" + 2-opt",route:x,distanceKm:dist(x),runtimeMs:0,decisions:ai.decisions}}));
+    }
+  }
+}catch(e:any){setErr(e?.message||"Request failed");setBenchLive(null)}setRunning(false);busyRef.current=false}
+function percentile(values:number[],p:number){if(!values.length)return null;const a=[...values].sort((x,y)=>x-y);const i=(a.length-1)*p;const lo=Math.floor(i),hi=Math.ceil(i);return a[lo]+(a[hi]-a[lo])*(i-lo)}
+function Scorecard({rows}:{rows:Result[]}){const grouped=rows.map(r=>{const base=r.algorithm.replace(/ \+ 2-opt$/,"");const raw=rows.find(x=>x.algorithm===base);const opt=r.algorithm.endsWith("2-opt");const decisions=r.decisions;const regret=decisions.filter(d=>d.regretKm!=null).map(d=>d.regretKm!);const agreement=decisions.length?decisions.filter(d=>d.oracleIso2===d.selected.iso2).length/decisions.length:null;return{r,base,rawDistance:raw?.distanceKm??(opt?null:r.distanceKm),improvement:opt&&raw?((raw.distanceKm-r.distanceKm)/raw.distanceKm)*100:null,agreement,regret:regret.length?regret.reduce((a,b)=>a+b,0)/regret.length:null,p50:null,p95:null}});return <section className="benchmark panel"><div className="panelTitle">BENCHMARK SCORECARD <span>DECISION QUALITY + ROUTE QUALITY</span></div><div className="timingTable"><div className="timingRow timingHead"><span>Method</span><span>Final km</span><span>Raw km</span><span>2-opt gain</span><span>Oracle %</span><span>Avg regret</span><span>Time</span></div>{grouped.map(x=><div className="timingRow" key={x.r.algorithm}><span>{x.r.algorithm}</span><span>{x.r.distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})}</span><span>{x.rawDistance?.toLocaleString(undefined,{maximumFractionDigits:0})??"—"}</span><span>{x.improvement!=null?x.improvement.toFixed(1)+"%":"—"}</span><span>{x.agreement!=null?(x.agreement*100).toFixed(1)+"%":"—"}</span><span>{x.regret!=null?x.regret.toFixed(0)+" km":"—"}</span><span>{(x.r.runtimeMs/1000).toFixed(2)} s</span></div>)}</div><div className="scoreLegend">Oracle agreement = fraction of decisions matching the deterministic one-step oracle. Regret = selected downstream cost minus oracle candidate cost. These are benchmark diagnostics, not claims of global optimality.</div></section>}
 if(err)return <main className="shell"><div className="error">DATASET ERROR<span>{err}</span></div></main>;
-return <main className="shell"><header className="topbar"><div><div className="eyebrow">JEV / SYSTEM ONE EXPERIMENT</div><h1>WORLD<span>TOUR</span></h1><p>Can an AI decision model navigate the world?</p></div><div className="status"><span className="dot"/><div>JEV DEMO</div><small>Deterministic provider</small></div></header>
-<section className="hero"><div><strong>195</strong><span>CAPITALS</span></div><div><strong>196</strong><span>LEGS</span></div><div><strong>{result?result.distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><span>ROUTE DISTANCE</span></div><div><strong>{result?.decisions.length||0}</strong><span>JEV DECISIONS</span></div></section>
-<section className="controls"><button onClick={run} disabled={!cities.length}>{running?"RUNNING":"RUN JEV"}</button><button className="ghost" onClick={benchmark} disabled={!cities.length}>BENCHMARK ALL</button><label>ALGORITHM<select value={algorithm} onChange={e=>setAlgorithm(e.target.value)}><option>JEV Demo + 2-opt</option><option>JEV Demo</option><option>NN + 2-opt</option><option>Nearest Neighbor</option><option>Random</option></select></label><label>SPEED<select value={speed} onChange={e=>setSpeed(+e.target.value)}><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label></section>
-<section className="mapCard"><div className="mapHead"><div><b>WORLD ROUTE</b><span>START / END · BENGALURU, INDIA</span></div><div className="filters"><select value={region} onChange={e=>setRegion(e.target.value)}><option>All</option></select><label><input type="checkbox" checked={showCandidates} onChange={e=>setShowCandidates(e.target.checked)}/> candidates</label></div></div><svg viewBox="0 0 1000 510" className="map"><g className="land">{features.features.map((f:any,i:number)=><path key={i} d={path(f)||""}/>)}</g>{line&&<polyline points={line} className="route"/>}{filtered.map(c=>{const p=projection([c.lon,c.lat]);if(!p)return null;const active=c.iso2===current.iso2,cand=showCandidates&&(decision?.candidates.some(x=>x.city.iso2===c.iso2)||false);return <g key={c.iso2} className={active?"capital active":cand?"capital candidate":"capital"}><circle cx={p[0]} cy={p[1]} r={active?5:cand?4:2.2}/><title>{c.capital+", "+c.country}</title></g>})}</svg></section>
-<section className="grid"><div className="panel"><div className="panelTitle">JEV DECISION TRACE <span>{decision?"#"+decision.step:"—"}</span></div>{decision?<><div className="decisionCurrent"><small>CURRENT</small><b>{decision.from.capital}</b><span>{decision.from.country}</span></div><div className="decisionPick"><small>SELECTED</small><b>{decision.selected.capital}</b><span>{decision.selected.country+" · "+decision.distanceKm.toFixed(0)+" km"}</span><em>{Math.round(decision.confidence*100)}%</em></div><div className="candidates">{decision.candidates.map((x,i)=><div key={x.city.iso2}><span>{String(i+1).padStart(2,"0")}</span><b>{x.city.capital}</b><i>{Math.round(x.confidence*100)}%</i><meter min="0" max="1" value={x.confidence}/></div>)}</div></>:<div className="empty">Run JEV to inspect candidate decisions.</div>}</div><div className="panel routePanel"><div className="panelTitle">ROUTE <span>{visible.length?Math.min(step,195)+"/195":"READY"}</span></div><div className="routeList">{visible.slice(0,80).map((c,i)=><div key={i} className={i===visible.length-1?"currentRow":""}><span>{String(i).padStart(3,"0")}</span><b>{c.capital}</b><small>{c.country}</small>{i<visible.length-1&&<i>{hav(c,visible[i+1]).toFixed(0)} km</i>}</div>)}{visible.length>80&&<div className="more">+ {visible.length-80} more legs</div>}</div></div></section>
-<section className="benchmark panel"><div className="panelTitle">BENCHMARK <span>SEED 20260919 · SAME DATASET</span></div>{bench.length?bench.map(x=><div className="benchRow" key={x.algorithm}><b>{x.algorithm}</b><div className="bar"><span style={{width:(Math.max(3,100*x.distanceKm/Math.max(...bench.map(y=>y.distanceKm)))+"%")}}/></div><strong>{x.distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km"}</strong><small>{x.runtimeMs.toFixed(1)+" ms"}</small></div>):<div className="empty">Run the benchmark to compare all methods.</div>}</section>
+return <main className="shell"><header className="topbar"><div><h1>WORLD<span>TOUR</span></h1></div><div className="status"><span className={providerMode==="live"?"dot live":"dot"}/><div>{providerMode==="live"?"JEV LIVE":"JEV DEMO"}</div><small>{providerMode==="live"?"System One connected":"Deterministic provider"}</small></div></header>
+<section className="hero"><div><strong>{tourCities.length}</strong><span>CAPITALS</span></div><div><strong>{tourCities.length+1}</strong><span>LEGS</span></div><div><strong>{result?result.distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><span>ROUTE DISTANCE</span></div><div><strong>{result?.decisions.length||0}</strong><span>{algorithm.startsWith("JEV")?"JEV DECISIONS":"DECISIONS"}</span></div><div><strong>{result?(result.runtimeMs/1000).toFixed(1)+" s":"—"}</strong><span>TIME</span></div></section>
+<section className="controls"><button onClick={run} disabled={!cities.length||running}>{running?"RUNNING":"RUN"}</button><button className="ghost" onClick={benchmark} disabled={!cities.length||running}>BENCHMARK ALL</button><label>START<select value={startIso} onChange={e=>setStartIso(e.target.value)} disabled={running}><option value="HOME">Bengaluru (home base)</option>{startOptions.map(c=><option key={c.iso2} value={c.iso2}>{c.capital} — {c.country}</option>)}</select></label><details className="modelPicker"><summary>SETTINGS</summary><div className="modelPickerBody settingsBody"><b className="pickerGroup">PROVIDER CONFIGURATION</b><div className="aiHint">JEV_API_URL, JEV_API_KEY, JEV_MODEL, OPENROUTER_API_KEY, COPILOT_GITHUB_TOKEN and COPILOT_MODEL are server-side environment variables. No provider secrets are stored in this browser. Claude CLI requires the `claude` binary to be installed and authenticated on the server — no env var needed.</div></div></details><details className="modelPicker"><summary>SELECT ({benchAlgos.length+benchModels.length+(benchClaudeCliModels.length?1:0)})</summary><div className="modelPickerBody"><b className="pickerGroup">ALGORITHMS</b>{BASE_ALGOS.map(a=><label key={a}><input type="checkbox" checked={benchAlgos.includes(a)} onChange={e=>setBenchAlgos(prev=>e.target.checked?[...prev,a]:prev.filter(x=>x!==a))}/> {a}</label>)}<b className="pickerGroup">AI MODELS{!aiConfigured&&" (no key)"}</b>{AI_MODELS.map(m=><label key={m}><input type="checkbox" checked={benchModels.includes(m)} disabled={!aiConfigured} onChange={e=>setBenchModels(prev=>e.target.checked?[...prev,m]:prev.filter(x=>x!==m))}/> {m}</label>)}<b className="pickerGroup">GITHUB COPILOT MODELS{!copilotConfigured&&" (no token)"}</b>{benchCopilotModels.map(m=><label key={"copilot-"+m}><input type="checkbox" checked={benchCopilotModels.includes(m)} disabled={!copilotConfigured} onChange={e=>setBenchCopilotModels(prev=>e.target.checked?[...prev,m]:prev.filter(x=>x!==m))}/> {m}</label>)}<b className="pickerGroup">CLAUDE CLI MODELS{!claudeCliConfigured&&" (cli unavailable)"}</b>{benchClaudeCliModels.map(m=><label key={"claude-cli-"+m}><input type="checkbox" checked={benchClaudeCliModels.includes(m)} disabled={!claudeCliConfigured} onChange={e=>setBenchClaudeCliModels(prev=>e.target.checked?[...prev,m]:prev.filter(x=>x!==m))}/> {m}</label>)}</div></details><label>ALGORITHM<select value={algorithm} onChange={e=>setAlgorithm(e.target.value)}><option>JEV + 2-opt</option><option>JEV</option><option>JEV Matrix + 2-opt</option><option>JEV Matrix</option><option>JEV Distance + 2-opt</option><option>JEV Distance</option><option>JEV Clustered + 2-opt</option><option>JEV Clustered</option><option>NN + 2-opt</option><option>Nearest Neighbor</option><option>Random</option><option disabled={!aiConfigured}>AI Engine + 2-opt</option><option disabled={!aiConfigured}>AI Engine</option><option disabled={!copilotConfigured}>Copilot + 2-opt</option><option disabled={!copilotConfigured}>Copilot</option><option disabled={!claudeCliConfigured}>Claude CLI + 2-opt</option><option disabled={!claudeCliConfigured}>Claude CLI</option><option disabled={!claudeFullConfigured}>Claude Full Problem</option></select></label>{!aiConfigured&&<small className="aiHint">Set OPENROUTER_API_KEY in .env.local to enable AI Engine</small>}{!copilotConfigured&&<small className="aiHint">Set COPILOT_GITHUB_TOKEN in .env.local to enable GitHub Copilot</small>}{!claudeCliConfigured&&<small className="aiHint">Install and authenticate the `claude` CLI on the server to enable Claude CLI</small>}{(algorithm==="AI Engine"||algorithm==="AI Engine + 2-opt")&&<label>MODEL<select value={aiModel} onChange={e=>setAiModel(e.target.value)}>{AI_MODELS.map(m=><option key={m} value={m}>{m}</option>)}</select></label>}{(algorithm==="Copilot"||algorithm==="Copilot + 2-opt")&&<label>MODEL<input value={copilotModel} onChange={e=>setCopilotModel(e.target.value)} placeholder="gpt-5.4"/></label>}{(algorithm==="Claude CLI"||algorithm==="Claude CLI + 2-opt")&&<label>MODEL<select value={claudeCliModel} onChange={e=>setClaudeCliModel(e.target.value)}>{benchClaudeCliModels.map(m=><option key={m} value={m}>{m}</option>)}</select></label>}{algorithm==="Claude Full Problem"&&<label>MODEL<select value={claudeFullModel} onChange={e=>setClaudeFullModel(e.target.value)}>{benchClaudeCliModels.map(m=><option key={m} value={m}>{m}</option>)}</select></label>}<label>SPEED<select value={speed} onChange={e=>setSpeed(+e.target.value)}><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label>MODE<div className="viewToggle"><button type="button" className={!textMode?"active":""} onClick={()=>setTextMode(false)}>MAP</button><button type="button" className={textMode?"active":""} onClick={()=>setTextMode(true)}>TEXT</button></div></label></section>
+<section className="grid3">
+{textMode?<div className="console panel"><div className="panelTitle">LIVE OUTPUT <span>{algorithm}{running?" · running":result?" · done":""}</span></div><div className="consoleBody">{log.length?<div className="logTable"><div className="logRow logHead"><span>Step</span><span>From</span><span>To</span><span>Distance</span><span>Conf</span><span>Candidates</span></div>{log.map((l,i)=>"note" in l?<div className="logEntry" key={i}><div className="logNote">{l.note}</div>{l.communication&&<details className="communication"><summary>COMMUNICATION · {l.communication.provider}{l.communication.model?` · ${l.communication.model}`:""}{l.communication.latencyMs!=null?` · ${l.communication.latencyMs} ms`:""}</summary><div className="communicationGrid"><div><b>REQUEST → MODEL</b><pre>{JSON.stringify(l.communication.request,null,2)}</pre></div><div><b>RESPONSE ← MODEL</b><pre>{JSON.stringify(l.communication.response,null,2)}</pre></div></div></details>}</div>:<div className="logEntry" key={i}><div className="logRow"><span>{String(l.step).padStart(3,"0")}</span><b>{l.from}</b><b>{l.to}</b><span>{l.km.toFixed(0)} km</span><span>{l.pct!=null?l.pct+"%":"—"}</span><i>{l.candidates||"—"}</i></div>{l.communication&&<details className="communication"><summary>COMMUNICATION · {l.communication.provider}{l.communication.model?` · ${l.communication.model}`:""}{l.communication.latencyMs!=null?` · ${l.communication.latencyMs} ms`:""}</summary><div className="communicationGrid"><div><b>REQUEST → MODEL</b><pre>{JSON.stringify(l.communication.request,null,2)}</pre></div><div><b>RESPONSE ← MODEL</b><pre>{JSON.stringify(l.communication.response,null,2)}</pre></div></div></details>}</div>)}</div>:<div className="empty">Run an algorithm to watch its decisions stream in here, live, as they happen.</div>}<div ref={logEndRef}/></div></div>:
+<div className="mapCard"><div className="mapHead"><div><b>WORLD ROUTE</b><span>START / END · {startCity.capital.toUpperCase()}, {startCity.country.toUpperCase()}</span></div><div className="filters"><select value={region} onChange={e=>setRegion(e.target.value)}><option>All</option></select><label><input type="checkbox" checked={showCandidates} onChange={e=>setShowCandidates(e.target.checked)}/> candidates</label></div></div><svg viewBox="0 0 1000 510" className="map"><g className="land">{features.features.map((f:any,i:number)=><path key={i} d={path(f)||""}/>)}</g>{line&&<polyline points={line} className="route"/>}{filtered.map(c=>{const p=projection([c.lon,c.lat]);if(!p)return null;const active=c.iso2===current.iso2,cand=showCandidates&&(decision?.candidates.some(x=>x.city.iso2===c.iso2)||false);return <g key={c.iso2} className={active?"capital active":cand?"capital candidate":"capital"}><circle cx={p[0]} cy={p[1]} r={active?5:cand?4:2.2}/><title>{c.capital+", "+c.country}</title></g>})}</svg></div>}
+<div className="panel"><div className="panelTitle">DECISION TRACE <span>{decision?"#"+decision.step:"—"}</span></div><div className="panelBody">{decision?<><div className="decisionCurrent"><small>CURRENT</small><b>{decision.from.capital}</b><span>{decision.from.country}</span></div><div className="decisionPick"><small>SELECTED</small><b>{decision.selected.capital}</b><span>{decision.selected.country+" · "+decision.distanceKm.toFixed(0)+" km"}</span><em>{decision.confidence!=null?Math.round(decision.confidence*100)+"%":"—"}</em></div><div className="candidates">{decision.candidates.map((x,i)=><div key={x.city.iso2}><span>{String(i+1).padStart(2,"0")}</span><b>{x.city.capital}</b><i>{x.confidence!=null?Math.round(x.confidence*100)+"%":"—"}</i><meter min="0" max="1" value={x.confidence??0}/></div>)}</div></>:<div className="empty">Run to inspect candidate decisions.</div>}</div></div>
+<div className="panel routePanel"><div className="panelTitle">ROUTE <span>{visible.length?Math.min(step,tourCities.length+1)+"/"+(tourCities.length+1):"READY"}</span></div><div className="routeList">{visible.map((c,i)=><div key={i} className={i===visible.length-1?"currentRow":""}><span>{String(i).padStart(3,"0")}</span><b>{c.capital}</b><small>{c.country}</small>{i<visible.length-1&&<i>{hav(c,visible[i+1]).toFixed(0)} km</i>}</div>)}<div ref={routeEndRef}/></div></div>
+</section>
+<section className="benchmark panel"><div className="panelTitle">BENCHMARK <span>{bench.length} RESULTS · SAME DATASET · SEED 20260919</span></div>{bench.length||benchLive?<div className="benchList">{bench.map(x=><BenchCard key={x.algorithm} algorithm={x.algorithm} route={x.route} decisions={x.decisions} distanceKm={x.distanceKm} runtimeMs={x.runtimeMs} error={(x as Result&{error?:string}).error}/>)}{benchLive&&<BenchCard key="live" algorithm={benchLive.algorithm} route={benchLive.route} decisions={benchLive.decisions} distanceKm={dist(benchLive.route)} runtimeMs={0} live/>}</div>:<div className="empty">Run the benchmark to compare all methods.</div>}</section>
+{bench.length>0&&<Scorecard rows={bench}/>} {bench.length>0&&<section className="benchmark panel"><div className="panelTitle">TIMING REPORT <span>fastest first</span></div><div className="timingTable"><div className="timingRow timingHead"><span>Algorithm</span><span>Total Time</span><span>Legs</span><span>ms / leg</span><span>Decisions</span><span>ms / decision</span></div>{[...bench].sort((a,b)=>a.runtimeMs-b.runtimeMs).map((x,i)=>{const legs=Math.max(1,x.route.length-1);return<div className={i===0?"timingRow fastest":"timingRow"} key={x.algorithm}><span>{x.algorithm}</span><span>{(x.runtimeMs/1000).toFixed(2)+" s"}</span><span>{legs}</span><span>{(x.runtimeMs/legs).toFixed(1)}</span><span>{x.decisions.length||"—"}</span><span>{x.decisions.length?(x.runtimeMs/x.decisions.length).toFixed(1):"—"}</span></div>})}</div></section>}
 <footer><span>✓ {cities.length||"—"} / 195 capitals loaded</span><span>Great-circle · R = 6371.0088 km</span><span>Heuristic benchmark — not a proof of global optimum</span></footer></main>}

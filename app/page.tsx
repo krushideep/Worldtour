@@ -115,7 +115,7 @@ async function claudeFullProblem(cities:Capital[],start:Capital,model:string):Pr
 async function load():Promise<Capital[]>{const r=await fetch("https://raw.githubusercontent.com/Stefie/geojson-world/46cbac88be743326b247baee180928683d0afe9f/capitals.geojson");if(!r.ok)throw Error("Capital dataset unavailable");const j=await r.json(),m=new Map<string,Capital>();for(const f of j.features||[]){const p=f.properties||{},id=p.iso2||f.id,name=p.city||conventions[id];if(!ISO195.has(id)||!name||!f.geometry?.coordinates)continue;m.set(id,{country:p.country,iso2:id,iso3:p.iso3,capital:conventions[id]||name,lon:f.geometry.coordinates[0],lat:f.geometry.coordinates[1],region:"Other"})}for(const id in manual)if(!m.has(id))m.set(id,manual[id]);const ov:Record<string,[number,number]>={LK:[6.9271,79.8612],BO:[-19.0196,-65.2619],ZA:[-25.7479,28.2293],TZ:[-6.163,35.7516],PS:[31.9038,35.2034],IN:[28.6139,77.209]};for(const k in ov)if(m.has(k)){m.get(k)!.lat=ov[k][0];m.get(k)!.lon=ov[k][1]}const out=[...m.values()].sort((a,b)=>a.country.localeCompare(b.country));if(out.length!==195)throw Error("Expected 195 capitals, found "+out.length);return out}
 
 const AI_MODELS=["openai/gpt-4o-mini","google/gemini-2.0-flash-001","anthropic/claude-3.5-haiku","meta-llama/llama-3.1-8b-instruct","qwen/qwen-2.5-72b-instruct"];
-const BASE_ALGOS=["Random","Nearest Neighbor","NN + 2-opt","JEV","JEV + 2-opt","JEV Distance","JEV Distance + 2-opt","JEV Matrix","JEV Matrix + 2-opt"];
+const BASE_ALGOS=["Random","Nearest Neighbor","NN + 2-opt","JEV","JEV + 2-opt","JEV Distance","JEV Distance + 2-opt","JEV Matrix","JEV Matrix + 2-opt","Claude Full Problem"];
 function pad(n:number){return String(n).padStart(3,"0")}
 function decisionLine(d:Decision){return `${pad(d.step)}  ${d.from.capital} → ${d.selected.capital}   ${d.distanceKm.toFixed(0)} km   ${Math.round(d.confidence*100)}%`}
 function DecisionMini({d}:{d?:Decision}){
@@ -223,7 +223,7 @@ async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.cur
     }
     setBenchLive(null);
   }
-  if(claudeFullConfigured){
+  if(claudeFullConfigured&&benchAlgos.includes("Claude Full Problem")){
     for(const model of benchClaudeCliModels){
       setBenchLive({algorithm:"Claude Full Problem: "+model,route:[startCity],decisions:[]});
       const raw=await t(async()=>{const r=await claudeFullProblem(cities,startCity,model);return{algorithm:"Claude Full Problem: "+model,route:r.route,distanceKm:dist(r.route),runtimeMs:r.latencyMs,decisions:[]}}); 

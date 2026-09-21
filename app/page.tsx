@@ -50,7 +50,6 @@ function kmeans<T extends{lat:number;lon:number}>(points:T[],k:number,seed:numbe
   const r=rng(seed),n=Math.min(k,points.length),idxs=new Set<number>();
   while(idxs.size<n)idxs.add(Math.floor(r()*points.length));
   const toVec=(p:T)=>{const lat=p.lat*Math.PI/180,lon=p.lon*Math.PI/180,cl=Math.cos(lat);return{x:cl*Math.cos(lon),y:cl*Math.sin(lon),z:Math.sin(lat)}};
-  const toCentroid=(v:{x:number;y:number;z:number})=>{const norm=Math.hypot(v.x,v.y,v.z)||1,lat=Math.asin(v.z/norm)*180/Math.PI,lon=Math.atan2(v.y,v.x)*180/Math.PI;return{lat,lon}};
   let centroids=[...idxs].map(i=>toVec(points[i]));
   let assign=new Array(points.length).fill(0);
   for(let iter=0;iter<20;iter++){
@@ -67,11 +66,17 @@ function kmeans<T extends{lat:number;lon:number}>(points:T[],k:number,seed:numbe
   for(let i=0;i<points.length;i++)groups[assign[i]].push(i);
   return groups.map(idx=>idx.map(i=>points[i])).filter(g=>g.length);
 }
+function sphericalCentroid(points:Capital[]){
+  let x=0,y=0,z=0;
+  for(const p of points){const lat=p.lat*Math.PI/180,lon=p.lon*Math.PI/180,cl=Math.cos(lat);x+=cl*Math.cos(lon);y+=cl*Math.sin(lon);z+=Math.sin(lat)}
+  const norm=Math.hypot(x,y,z)||1;
+  return{lat:Math.asin(z/norm)*180/Math.PI,lon:Math.atan2(y,x)*180/Math.PI};
+}
 function buildClusterNodes(cities:Capital[],k:number,seed=20260919):{node:Capital;members:Capital[]}[]{
   const groups=kmeans(cities,k,seed);
   return groups.map((members,i)=>{
-    const lat=members.reduce((a,c)=>a+c.lat,0)/members.length,lon=members.reduce((a,c)=>a+c.lon,0)/members.length;
-    return{node:{country:"",iso2:"CL"+i,iso3:"",capital:`Region ${i+1} (${members.length} capitals)`,lat,lon,region:"cluster"} as Capital,members};
+    const {lat,lon}=sphericalCentroid(members);
+    return{node:{country:"",iso2:`CL${String(i+1).padStart(2,"0")}`,iso3:"",capital:`Region ${i+1} · ${members.length} capitals`,lat,lon,region:"cluster"} as Capital,members};
   });
 }
 async function jevClustered(cities:Capital[],start:Capital,settings:Settings,mode:JEVMode,onMode?:(m:"demo"|"live")=>void,onClusterStep?:(d:Decision,routeSoFar:Capital[])=>void,k=24){
@@ -165,19 +170,19 @@ async function load():Promise<Capital[]>{const r=await fetch("https://raw.github
 const AI_MODELS=["openai/gpt-4o-mini","google/gemini-2.0-flash-001","anthropic/claude-3.5-haiku","meta-llama/llama-3.1-8b-instruct","qwen/qwen-2.5-72b-instruct"];
 const BASE_ALGOS=["Random","Nearest Neighbor","NN + 2-opt","JEV","JEV + 2-opt","JEV Distance","JEV Distance + 2-opt","JEV Matrix","JEV Matrix + 2-opt","JEV Clustered","JEV Clustered + 2-opt","Claude Full Problem"];
 function pad(n:number){return String(n).padStart(3,"0")}
-function decisionLine(d:Decision){return `${pad(d.step)}  ${d.from.capital} → ${d.selected.capital}   ${d.distanceKm.toFixed(0)} km   ${Math.round(d.confidence*100)}%`}
+function decisionLine(d:Decision){return `${pad(d.step)}  ${d.from.capital} → ${d.selected.capital}   ${d.distanceKm.toFixed(0)} km   ${d.confidence!=null?Math.round(d.confidence*100)+"%":"—"}`}
 function DecisionMini({d}:{d?:Decision}){
   if(!d)return <span className="empty">—</span>;
   return <div className="benchDecision"><span>{d.from.capital} → {d.selected.capital}</span><i>{Math.round(d.confidence*100)}%</i></div>;
 }
-function BenchCard({algorithm,route,decisions,distanceKm,runtimeMs,live}:{algorithm:string;route:Capital[];decisions:Decision[];distanceKm:number;runtimeMs:number;live?:boolean}){
-  return <div className={live?"benchCard live":"benchCard"}>
-    <div className="benchCardHead"><b>{algorithm}</b><span className={live?"runTag":"doneTag"}>{live?"RUNNING":"DONE"}</span><strong>{distanceKm?distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><small>{live?decisions.length+"/195":(runtimeMs/1000).toFixed(1)+" s"}</small></div>
-    <div className="benchCardBody">
+function BenchCard({algorithm,route,decisions,distanceKm,runtimeMs,live,error}:{algorithm:string;route:Capital[];decisions:Decision[];distanceKm:number;runtimeMs:number;live?:boolean;error?:string}){
+  return <div className={live?"benchCard live":error?"benchCard failed":"benchCard"}>
+    <div className="benchCardHead"><b>{algorithm}</b><span className={live?"runTag":error?"errorTag":"doneTag"}>{live?"RUNNING":error?"FAILED":"DONE"}</span><strong>{error?"—":distanceKm?distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><small>{live?decisions.length+"/195":error?"stopped":(runtimeMs/1000).toFixed(1)+" s"}</small></div>
+    {error?<div className="benchError">{error}</div>:<div className="benchCardBody">
       <div className="benchMini"><b>LIVE OUTPUT</b><div className="benchLog">{decisions.length?decisions.slice(-30).map((d,i)=><div key={i}>{decisionLine(d)}</div>):<span className="empty">—</span>}</div></div>
       <div className="benchMini"><b>DECISION</b><DecisionMini d={decisions[decisions.length-1]}/></div>
       <div className="benchMini"><b>ROUTE</b><div className="benchRouteList">{route.slice(-30).map((c,i)=><div key={i}>{c.capital}</div>)}</div></div>
-    </div>
+    </div>}
   </div>;
 }
 export default function Home(){const[cities,setCities]=useState<Capital[]>([]),[err,setErr]=useState(""),[result,setResult]=useState<Result|null>(null),[bench,setBench]=useState<Result[]>([]),[step,setStep]=useState(0),[speed,setSpeed]=useState(1),[algorithm,setAlgorithm]=useState("JEV + 2-opt"),[region,setRegion]=useState("All"),[showCandidates,setShowCandidates]=useState(true),[running,setRunning]=useState(false),[providerMode,setProviderMode]=useState<"demo"|"live">("demo"),[aiConfigured,setAiConfigured]=useState(false),[aiModel,setAiModel]=useState(AI_MODELS[0]),[copilotConfigured,setCopilotConfigured]=useState(false),[copilotModel,setCopilotModel]=useState("gpt-5.4"),[claudeCliConfigured,setClaudeCliConfigured]=useState(false),[claudeCliModel,setClaudeCliModel]=useState("haiku"),[claudeFullConfigured,setClaudeFullConfigured]=useState(false),[claudeFullModel,setClaudeFullModel]=useState("haiku"),[benchModels,setBenchModels]=useState<string[]>([AI_MODELS[0]]),[benchCopilotModels,setBenchCopilotModels]=useState<string[]>(["gpt-5.4"]),[benchClaudeCliModels,setBenchClaudeCliModels]=useState<string[]>(["haiku"]),[benchAlgos,setBenchAlgos]=useState<string[]>([...BASE_ALGOS]),[benchLive,setBenchLive]=useState<{algorithm:string;route:Capital[];decisions:Decision[]}|null>(null),[textMode,setTextMode]=useState(false),[log,setLog]=useState<LogEntry[]>([]),[startIso,setStartIso]=useState("HOME"),[settings,setSettings]=useState<Settings>(EMPTY_SETTINGS),[settingsDraft,setSettingsDraft]=useState<Settings>(EMPTY_SETTINGS),[settingsSaved,setSettingsSaved]=useState(false),busyRef=useRef(false),logEndRef=useRef<HTMLDivElement>(null),routeEndRef=useRef<HTMLDivElement>(null);
@@ -243,9 +248,14 @@ async function run(){if(!cities.length||busyRef.current)return;busyRef.current=t
   }catch(e:any){setErr(e?.message||"Request failed");setRunning(false);busyRef.current=false;return}
   setRunning(false);busyRef.current=false;
 }
-async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.current=true;setRunning(true);setBench([]);try{
+async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.current=true;setRunning(true);setBench([]);setErr("");try{
   const t=async(fn:()=>Promise<Result>)=>{const s=performance.now(),r=await fn();r.runtimeMs=performance.now()-s;return r};
   const push=(r:Result)=>setBench(prev=>[...prev,r]);
+  const runCase=async(name:string,fn:()=>Promise<Result>)=>{
+    setBenchLive({algorithm:name,route:[startCity],decisions:[]});
+    try{const r=await t(fn);push(r)}catch(e:any){push({algorithm:name,route:[startCity],distanceKm:0,runtimeMs:0,decisions:[],error:e?.message||"Request failed"} as Result&{error:string})}
+    setBenchLive(null);
+  };
 
   if(benchAlgos.includes("Random")){
     push(await t(async()=>{const x=randomRoute(tourCities,startCity);return{algorithm:"Random",route:x,distanceKm:dist(x),runtimeMs:0,decisions:[]}}));
@@ -260,25 +270,24 @@ async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.cur
     const distanceMatrix=buildDistanceMatrix([startCity,...tourCities]);
     for(const alg of ["JEV","JEV + 2-opt"]){
       if(!benchAlgos.includes(alg))continue;
-      setBenchLive({algorithm:alg,route:[startCity],decisions:[]});
-      const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
-      const raw=await t(async()=>{const r=await jev(tourCities,startCity,settings,"geographic",distanceMatrix,setProviderMode,onStep);return{algorithm:alg,route:r.route,distanceKm:dist(r.route),runtimeMs:0,decisions:r.decisions}});
-      const out=alg.endsWith("2-opt")?{...raw,route:twoOpt(raw.route),distanceKm:dist(twoOpt(raw.route))}:raw;
-      push(out);setBenchLive(null);
+      await runCase(alg,async()=>{
+        const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
+        const raw=await jev(tourCities,startCity,settings,"geographic",distanceMatrix,setProviderMode,onStep);
+        const x=alg.endsWith("2-opt")?twoOpt(raw.route):raw.route;
+        return{algorithm:alg,route:x,distanceKm:dist(x),runtimeMs:0,decisions:raw.decisions};
+      });
     }
   }
 
   if(benchAlgos.includes("JEV Clustered")||benchAlgos.includes("JEV Clustered + 2-opt")){
     for(const alg of ["JEV Clustered","JEV Clustered + 2-opt"]){
       if(!benchAlgos.includes(alg))continue;
-      setBenchLive({algorithm:alg,route:[startCity],decisions:[]});
-      const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
-      const raw=await t(async()=>{
+      await runCase(alg,async()=>{
+        const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
         const r=await jevClustered(tourCities,startCity,settings,"geographic",setProviderMode,onStep,24);
-        return{algorithm:"JEV Clustered",route:r.route,distanceKm:dist(r.route),runtimeMs:0,decisions:r.decisions};
+        const x=alg.endsWith("2-opt")?twoOpt(r.route):r.route;
+        return{algorithm:alg,route:x,distanceKm:dist(x),runtimeMs:0,decisions:r.decisions};
       });
-      const out=alg.endsWith("2-opt")?{...raw,algorithm:alg,route:twoOpt(raw.route),distanceKm:dist(twoOpt(raw.route))}:{...raw,algorithm:alg};
-      push(out);setBenchLive(null);
     }
   }
 
@@ -330,7 +339,7 @@ function percentile(values:number[],p:number){if(!values.length)return null;cons
 function Scorecard({rows}:{rows:Result[]}){const grouped=rows.map(r=>{const base=r.algorithm.replace(/ \+ 2-opt$/,"");const raw=rows.find(x=>x.algorithm===base);const opt=r.algorithm.endsWith("2-opt");const decisions=r.decisions;const regret=decisions.filter(d=>d.regretKm!=null).map(d=>d.regretKm!);const agreement=decisions.length?decisions.filter(d=>d.oracleIso2===d.selected.iso2).length/decisions.length:null;return{r,base,rawDistance:raw?.distanceKm??(opt?null:r.distanceKm),improvement:opt&&raw?((raw.distanceKm-r.distanceKm)/raw.distanceKm)*100:null,agreement,regret:regret.length?regret.reduce((a,b)=>a+b,0)/regret.length:null,p50:null,p95:null}});return <section className="benchmark panel"><div className="panelTitle">BENCHMARK SCORECARD <span>DECISION QUALITY + ROUTE QUALITY</span></div><div className="timingTable"><div className="timingRow timingHead"><span>Method</span><span>Final km</span><span>Raw km</span><span>2-opt gain</span><span>Oracle %</span><span>Avg regret</span><span>Time</span></div>{grouped.map(x=><div className="timingRow" key={x.r.algorithm}><span>{x.r.algorithm}</span><span>{x.r.distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})}</span><span>{x.rawDistance?.toLocaleString(undefined,{maximumFractionDigits:0})??"—"}</span><span>{x.improvement!=null?x.improvement.toFixed(1)+"%":"—"}</span><span>{x.agreement!=null?(x.agreement*100).toFixed(1)+"%":"—"}</span><span>{x.regret!=null?x.regret.toFixed(0)+" km":"—"}</span><span>{(x.r.runtimeMs/1000).toFixed(2)} s</span></div>)}</div><div className="scoreLegend">Oracle agreement = fraction of decisions matching the deterministic one-step oracle. Regret = selected downstream cost minus oracle candidate cost. These are benchmark diagnostics, not claims of global optimality.</div></section>}
 if(err)return <main className="shell"><div className="error">DATASET ERROR<span>{err}</span></div></main>;
 return <main className="shell"><header className="topbar"><div><h1>WORLD<span>TOUR</span></h1></div><div className="status"><span className={providerMode==="live"?"dot live":"dot"}/><div>{providerMode==="live"?"JEV LIVE":"JEV DEMO"}</div><small>{providerMode==="live"?"System One connected":"Deterministic provider"}</small></div></header>
-<section className="hero"><div><strong>{tourCities.length}</strong><span>CAPITALS</span></div><div><strong>{tourCities.length+1}</strong><span>LEGS</span></div><div><strong>{result?result.distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><span>ROUTE DISTANCE</span></div><div><strong>{result?.decisions.length||0}</strong><span>JEV DECISIONS</span></div><div><strong>{result?(result.runtimeMs/1000).toFixed(1)+" s":"—"}</strong><span>TIME</span></div></section>
+<section className="hero"><div><strong>{tourCities.length}</strong><span>CAPITALS</span></div><div><strong>{tourCities.length+1}</strong><span>LEGS</span></div><div><strong>{result?result.distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><span>ROUTE DISTANCE</span></div><div><strong>{result?.decisions.length||0}</strong><span>{algorithm.startsWith("JEV")?"JEV DECISIONS":"DECISIONS"}</span></div><div><strong>{result?(result.runtimeMs/1000).toFixed(1)+" s":"—"}</strong><span>TIME</span></div></section>
 <section className="controls"><button onClick={run} disabled={!cities.length||running}>{running?"RUNNING":"RUN"}</button><button className="ghost" onClick={benchmark} disabled={!cities.length||running}>BENCHMARK ALL</button><label>START<select value={startIso} onChange={e=>setStartIso(e.target.value)} disabled={running}><option value="HOME">Bengaluru (home base)</option>{startOptions.map(c=><option key={c.iso2} value={c.iso2}>{c.capital} — {c.country}</option>)}</select></label><details className="modelPicker"><summary>SETTINGS</summary><div className="modelPickerBody settingsBody"><b className="pickerGroup">PROVIDER CONFIGURATION</b><div className="aiHint">JEV_API_URL, JEV_API_KEY, JEV_MODEL, OPENROUTER_API_KEY, COPILOT_GITHUB_TOKEN and COPILOT_MODEL are server-side environment variables. No provider secrets are stored in this browser. Claude CLI requires the `claude` binary to be installed and authenticated on the server — no env var needed.</div></div></details><details className="modelPicker"><summary>SELECT ({benchAlgos.length+benchModels.length+(benchClaudeCliModels.length?1:0)})</summary><div className="modelPickerBody"><b className="pickerGroup">ALGORITHMS</b>{BASE_ALGOS.map(a=><label key={a}><input type="checkbox" checked={benchAlgos.includes(a)} onChange={e=>setBenchAlgos(prev=>e.target.checked?[...prev,a]:prev.filter(x=>x!==a))}/> {a}</label>)}<b className="pickerGroup">AI MODELS{!aiConfigured&&" (no key)"}</b>{AI_MODELS.map(m=><label key={m}><input type="checkbox" checked={benchModels.includes(m)} disabled={!aiConfigured} onChange={e=>setBenchModels(prev=>e.target.checked?[...prev,m]:prev.filter(x=>x!==m))}/> {m}</label>)}<b className="pickerGroup">GITHUB COPILOT MODELS{!copilotConfigured&&" (no token)"}</b>{benchCopilotModels.map(m=><label key={"copilot-"+m}><input type="checkbox" checked={benchCopilotModels.includes(m)} disabled={!copilotConfigured} onChange={e=>setBenchCopilotModels(prev=>e.target.checked?[...prev,m]:prev.filter(x=>x!==m))}/> {m}</label>)}<b className="pickerGroup">CLAUDE CLI MODELS{!claudeCliConfigured&&" (cli unavailable)"}</b>{benchClaudeCliModels.map(m=><label key={"claude-cli-"+m}><input type="checkbox" checked={benchClaudeCliModels.includes(m)} disabled={!claudeCliConfigured} onChange={e=>setBenchClaudeCliModels(prev=>e.target.checked?[...prev,m]:prev.filter(x=>x!==m))}/> {m}</label>)}</div></details><label>ALGORITHM<select value={algorithm} onChange={e=>setAlgorithm(e.target.value)}><option>JEV + 2-opt</option><option>JEV</option><option>JEV Matrix + 2-opt</option><option>JEV Matrix</option><option>JEV Distance + 2-opt</option><option>JEV Distance</option><option>JEV Clustered + 2-opt</option><option>JEV Clustered</option><option>NN + 2-opt</option><option>Nearest Neighbor</option><option>Random</option><option disabled={!aiConfigured}>AI Engine + 2-opt</option><option disabled={!aiConfigured}>AI Engine</option><option disabled={!copilotConfigured}>Copilot + 2-opt</option><option disabled={!copilotConfigured}>Copilot</option><option disabled={!claudeCliConfigured}>Claude CLI + 2-opt</option><option disabled={!claudeCliConfigured}>Claude CLI</option><option disabled={!claudeFullConfigured}>Claude Full Problem</option></select></label>{!aiConfigured&&<small className="aiHint">Set OPENROUTER_API_KEY in .env.local to enable AI Engine</small>}{!copilotConfigured&&<small className="aiHint">Set COPILOT_GITHUB_TOKEN in .env.local to enable GitHub Copilot</small>}{!claudeCliConfigured&&<small className="aiHint">Install and authenticate the `claude` CLI on the server to enable Claude CLI</small>}{(algorithm==="AI Engine"||algorithm==="AI Engine + 2-opt")&&<label>MODEL<select value={aiModel} onChange={e=>setAiModel(e.target.value)}>{AI_MODELS.map(m=><option key={m} value={m}>{m}</option>)}</select></label>}{(algorithm==="Copilot"||algorithm==="Copilot + 2-opt")&&<label>MODEL<input value={copilotModel} onChange={e=>setCopilotModel(e.target.value)} placeholder="gpt-5.4"/></label>}{(algorithm==="Claude CLI"||algorithm==="Claude CLI + 2-opt")&&<label>MODEL<select value={claudeCliModel} onChange={e=>setClaudeCliModel(e.target.value)}>{benchClaudeCliModels.map(m=><option key={m} value={m}>{m}</option>)}</select></label>}{algorithm==="Claude Full Problem"&&<label>MODEL<select value={claudeFullModel} onChange={e=>setClaudeFullModel(e.target.value)}>{benchClaudeCliModels.map(m=><option key={m} value={m}>{m}</option>)}</select></label>}<label>SPEED<select value={speed} onChange={e=>setSpeed(+e.target.value)}><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label>MODE<div className="viewToggle"><button type="button" className={!textMode?"active":""} onClick={()=>setTextMode(false)}>MAP</button><button type="button" className={textMode?"active":""} onClick={()=>setTextMode(true)}>TEXT</button></div></label></section>
 <section className="grid3">
 {textMode?<div className="console panel"><div className="panelTitle">LIVE OUTPUT <span>{algorithm}{running?" · running":result?" · done":""}</span></div><div className="consoleBody">{log.length?<div className="logTable"><div className="logRow logHead"><span>Step</span><span>From</span><span>To</span><span>Distance</span><span>Conf</span><span>Candidates</span></div>{log.map((l,i)=>"note" in l?<div className="logEntry" key={i}><div className="logNote">{l.note}</div>{l.communication&&<details className="communication"><summary>COMMUNICATION · {l.communication.provider}{l.communication.model?` · ${l.communication.model}`:""}{l.communication.latencyMs!=null?` · ${l.communication.latencyMs} ms`:""}</summary><div className="communicationGrid"><div><b>REQUEST → MODEL</b><pre>{JSON.stringify(l.communication.request,null,2)}</pre></div><div><b>RESPONSE ← MODEL</b><pre>{JSON.stringify(l.communication.response,null,2)}</pre></div></div></details>}</div>:<div className="logEntry" key={i}><div className="logRow"><span>{String(l.step).padStart(3,"0")}</span><b>{l.from}</b><b>{l.to}</b><span>{l.km.toFixed(0)} km</span><span>{l.pct!=null?l.pct+"%":"—"}</span><i>{l.candidates||"—"}</i></div>{l.communication&&<details className="communication"><summary>COMMUNICATION · {l.communication.provider}{l.communication.model?` · ${l.communication.model}`:""}{l.communication.latencyMs!=null?` · ${l.communication.latencyMs} ms`:""}</summary><div className="communicationGrid"><div><b>REQUEST → MODEL</b><pre>{JSON.stringify(l.communication.request,null,2)}</pre></div><div><b>RESPONSE ← MODEL</b><pre>{JSON.stringify(l.communication.response,null,2)}</pre></div></div></details>}</div>)}</div>:<div className="empty">Run an algorithm to watch its decisions stream in here, live, as they happen.</div>}<div ref={logEndRef}/></div></div>:
@@ -338,6 +347,6 @@ return <main className="shell"><header className="topbar"><div><h1>WORLD<span>TO
 <div className="panel"><div className="panelTitle">DECISION TRACE <span>{decision?"#"+decision.step:"—"}</span></div><div className="panelBody">{decision?<><div className="decisionCurrent"><small>CURRENT</small><b>{decision.from.capital}</b><span>{decision.from.country}</span></div><div className="decisionPick"><small>SELECTED</small><b>{decision.selected.capital}</b><span>{decision.selected.country+" · "+decision.distanceKm.toFixed(0)+" km"}</span><em>{decision.confidence!=null?Math.round(decision.confidence*100)+"%":"—"}</em></div><div className="candidates">{decision.candidates.map((x,i)=><div key={x.city.iso2}><span>{String(i+1).padStart(2,"0")}</span><b>{x.city.capital}</b><i>{x.confidence!=null?Math.round(x.confidence*100)+"%":"—"}</i><meter min="0" max="1" value={x.confidence??0}/></div>)}</div></>:<div className="empty">Run to inspect candidate decisions.</div>}</div></div>
 <div className="panel routePanel"><div className="panelTitle">ROUTE <span>{visible.length?Math.min(step,tourCities.length+1)+"/"+(tourCities.length+1):"READY"}</span></div><div className="routeList">{visible.map((c,i)=><div key={i} className={i===visible.length-1?"currentRow":""}><span>{String(i).padStart(3,"0")}</span><b>{c.capital}</b><small>{c.country}</small>{i<visible.length-1&&<i>{hav(c,visible[i+1]).toFixed(0)} km</i>}</div>)}<div ref={routeEndRef}/></div></div>
 </section>
-<section className="benchmark panel"><div className="panelTitle">BENCHMARK <span>SEED 20260919 · SAME DATASET</span></div>{bench.length||benchLive?<div className="benchList">{bench.map(x=><BenchCard key={x.algorithm} algorithm={x.algorithm} route={x.route} decisions={x.decisions} distanceKm={x.distanceKm} runtimeMs={x.runtimeMs}/>)}{benchLive&&<BenchCard key="live" algorithm={benchLive.algorithm} route={benchLive.route} decisions={benchLive.decisions} distanceKm={dist(benchLive.route)} runtimeMs={0} live/>}</div>:<div className="empty">Run the benchmark to compare all methods.</div>}</section>
+<section className="benchmark panel"><div className="panelTitle">BENCHMARK <span>{bench.length} RESULTS · SAME DATASET · SEED 20260919</span></div>{bench.length||benchLive?<div className="benchList">{bench.map(x=><BenchCard key={x.algorithm} algorithm={x.algorithm} route={x.route} decisions={x.decisions} distanceKm={x.distanceKm} runtimeMs={x.runtimeMs} error={(x as Result&{error?:string}).error}/>)}{benchLive&&<BenchCard key="live" algorithm={benchLive.algorithm} route={benchLive.route} decisions={benchLive.decisions} distanceKm={dist(benchLive.route)} runtimeMs={0} live/>}</div>:<div className="empty">Run the benchmark to compare all methods.</div>}</section>
 {bench.length>0&&<Scorecard rows={bench}/>} {bench.length>0&&<section className="benchmark panel"><div className="panelTitle">TIMING REPORT <span>fastest first</span></div><div className="timingTable"><div className="timingRow timingHead"><span>Algorithm</span><span>Total Time</span><span>Legs</span><span>ms / leg</span><span>Decisions</span><span>ms / decision</span></div>{[...bench].sort((a,b)=>a.runtimeMs-b.runtimeMs).map((x,i)=>{const legs=Math.max(1,x.route.length-1);return<div className={i===0?"timingRow fastest":"timingRow"} key={x.algorithm}><span>{x.algorithm}</span><span>{(x.runtimeMs/1000).toFixed(2)+" s"}</span><span>{legs}</span><span>{(x.runtimeMs/legs).toFixed(1)}</span><span>{x.decisions.length||"—"}</span><span>{x.decisions.length?(x.runtimeMs/x.decisions.length).toFixed(1):"—"}</span></div>})}</div></section>}
 <footer><span>✓ {cities.length||"—"} / 195 capitals loaded</span><span>Great-circle · R = 6371.0088 km</span><span>Heuristic benchmark — not a proof of global optimum</span></footer></main>}

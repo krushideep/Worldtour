@@ -18,7 +18,7 @@ function aiHeaders(){return {"content-type":"application/json"}}
 function copilotHeaders(){return {"content-type":"application/json"}}
 function claudeCliHeaders(){return {"content-type":"application/json"}}
 
-const HOME:Capital={country:"India",iso2:"IN",iso3:"IND",capital:"Bengaluru",lat:12.9716,lon:77.5946,region:"Asia"};
+const HOME:Capital={country:"India",iso2:"HOME",iso3:"HOME",capital:"Bengaluru",lat:12.9716,lon:77.5946,region:"Asia"};
 const ISO195=new Set("AF AL DZ AD AO AG AR AM AU AT AZ BS BH BD BB BY BE BZ BJ BT BO BA BW BR BN BG BF BI CV KH CM CA CF TD CL CN CO KM CG CD CR CI HR CU CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FJ FI FR GA GM GE DE GH GR GD GT GN GW GY HT HN HU IS IN ID IR IQ IE IL IT JM JP JO KZ KE KI KP KR KW KG LA LV LB LS LR LY LI LT LU MG MW MY MV ML MT MH MR MU MX FM MD MC MN ME MA MZ MM NA NR NP NL NZ NI NE NG MK NO OM PK PW PA PG PY PE PH PL PT QA RO RU RW KN LC VC WS SM ST SA SN RS SC SL SG SK SI SB SO ZA SS ES LK SD SR SE CH SY TJ TZ TH TL TG TO TT TN TR TM TV UG UA AE GB US UY UZ VU VA VE VN YE ZM ZW PS".split(" "));
 const conventions:Record<string,string>={BO:"Sucre",LK:"Sri Jayawardenepura Kotte",ZA:"Pretoria",TZ:"Dodoma",PS:"Ramallah",NR:"Yaren"};
 const manual:Record<string,Capital>={SS:{country:"South Sudan",iso2:"SS",iso3:"SSD",capital:"Juba",lat:4.8594,lon:31.5713,region:"Other"}};
@@ -49,17 +49,19 @@ async function jev(c:Capital[],start:Capital=HOME,settings:Settings=EMPTY_SETTIN
 function kmeans<T extends{lat:number;lon:number}>(points:T[],k:number,seed:number):T[][]{
   const r=rng(seed),n=Math.min(k,points.length),idxs=new Set<number>();
   while(idxs.size<n)idxs.add(Math.floor(r()*points.length));
-  let centroids=[...idxs].map(i=>({lat:points[i].lat,lon:points[i].lon}));
+  const toVec=(p:T)=>{const lat=p.lat*Math.PI/180,lon=p.lon*Math.PI/180,cl=Math.cos(lat);return{x:cl*Math.cos(lon),y:cl*Math.sin(lon),z:Math.sin(lat)}};
+  const toCentroid=(v:{x:number;y:number;z:number})=>{const norm=Math.hypot(v.x,v.y,v.z)||1,lat=Math.asin(v.z/norm)*180/Math.PI,lon=Math.atan2(v.y,v.x)*180/Math.PI;return{lat,lon}};
+  let centroids=[...idxs].map(i=>toVec(points[i]));
   let assign=new Array(points.length).fill(0);
-  for(let iter=0;iter<15;iter++){
+  for(let iter=0;iter<20;iter++){
     for(let i=0;i<points.length;i++){
-      let best=0,bestD=Infinity;
-      for(let c=0;c<centroids.length;c++){const dLat=points[i].lat-centroids[c].lat,dLon=points[i].lon-centroids[c].lon,d=dLat*dLat+dLon*dLon;if(d<bestD){bestD=d;best=c}}
+      const v=toVec(points[i]);let best=0,bestScore=-Infinity;
+      for(let c=0;c<centroids.length;c++){const score=v.x*centroids[c].x+v.y*centroids[c].y+v.z*centroids[c].z;if(score>bestScore){bestScore=score;best=c}}
       assign[i]=best;
     }
-    const sums=centroids.map(()=>({lat:0,lon:0,n:0}));
-    for(let i=0;i<points.length;i++){const c=assign[i];sums[c].lat+=points[i].lat;sums[c].lon+=points[i].lon;sums[c].n++}
-    centroids=sums.map((s,c)=>s.n?{lat:s.lat/s.n,lon:s.lon/s.n}:centroids[c]);
+    const sums=centroids.map(()=>({x:0,y:0,z:0,n:0}));
+    for(let i=0;i<points.length;i++){const c=assign[i],v=toVec(points[i]);sums[c].x+=v.x;sums[c].y+=v.y;sums[c].z+=v.z;sums[c].n++}
+    centroids=sums.map((v,c)=>v.n?{x:v.x/v.n,y:v.y/v.n,z:v.z/v.n}:centroids[c]);
   }
   const groups=centroids.map(()=>[] as number[]);
   for(let i=0;i<points.length;i++)groups[assign[i]].push(i);
@@ -83,7 +85,7 @@ async function jevClustered(cities:Capital[],start:Capital,settings:Settings,mod
     const ordered=nearest(def.members,cur).slice(1,-1);
     route.push(...ordered);
     cur=ordered[ordered.length-1]||cur;
-    const mapped:Decision={...d,step:route.length-1};
+    const mapped:Decision={...d,step:route.length-1,oracleIso2:undefined,regretKm:undefined,strategy:d.strategy?`cluster:${d.strategy}`:"cluster"};
     decisions.push(mapped);
     onClusterStep?.(mapped,[...route]);
   };
@@ -161,7 +163,7 @@ async function claudeFullProblem(cities:Capital[],start:Capital,model:string):Pr
 async function load():Promise<Capital[]>{const r=await fetch("https://raw.githubusercontent.com/Stefie/geojson-world/46cbac88be743326b247baee180928683d0afe9f/capitals.geojson");if(!r.ok)throw Error("Capital dataset unavailable");const j=await r.json(),m=new Map<string,Capital>();for(const f of j.features||[]){const p=f.properties||{},id=p.iso2||f.id,name=p.city||conventions[id];if(!ISO195.has(id)||!name||!f.geometry?.coordinates)continue;m.set(id,{country:p.country,iso2:id,iso3:p.iso3,capital:conventions[id]||name,lon:f.geometry.coordinates[0],lat:f.geometry.coordinates[1],region:"Other"})}for(const id in manual)if(!m.has(id))m.set(id,manual[id]);const ov:Record<string,[number,number]>={LK:[6.9271,79.8612],BO:[-19.0196,-65.2619],ZA:[-25.7479,28.2293],TZ:[-6.163,35.7516],PS:[31.9038,35.2034],IN:[28.6139,77.209]};for(const k in ov)if(m.has(k)){m.get(k)!.lat=ov[k][0];m.get(k)!.lon=ov[k][1]}const out=[...m.values()].sort((a,b)=>a.country.localeCompare(b.country));if(out.length!==195)throw Error("Expected 195 capitals, found "+out.length);return out}
 
 const AI_MODELS=["openai/gpt-4o-mini","google/gemini-2.0-flash-001","anthropic/claude-3.5-haiku","meta-llama/llama-3.1-8b-instruct","qwen/qwen-2.5-72b-instruct"];
-const BASE_ALGOS=["Random","Nearest Neighbor","NN + 2-opt","JEV","JEV + 2-opt","JEV Distance","JEV Distance + 2-opt","JEV Matrix","JEV Matrix + 2-opt","Claude Full Problem"];
+const BASE_ALGOS=["Random","Nearest Neighbor","NN + 2-opt","JEV","JEV + 2-opt","JEV Distance","JEV Distance + 2-opt","JEV Matrix","JEV Matrix + 2-opt","JEV Clustered","JEV Clustered + 2-opt","Claude Full Problem"];
 function pad(n:number){return String(n).padStart(3,"0")}
 function decisionLine(d:Decision){return `${pad(d.step)}  ${d.from.capital} → ${d.selected.capital}   ${d.distanceKm.toFixed(0)} km   ${Math.round(d.confidence*100)}%`}
 function DecisionMini({d}:{d?:Decision}){
@@ -262,6 +264,20 @@ async function benchmark(){if(!cities.length||busyRef.current)return;busyRef.cur
       const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
       const raw=await t(async()=>{const r=await jev(tourCities,startCity,settings,"geographic",distanceMatrix,setProviderMode,onStep);return{algorithm:alg,route:r.route,distanceKm:dist(r.route),runtimeMs:0,decisions:r.decisions}});
       const out=alg.endsWith("2-opt")?{...raw,route:twoOpt(raw.route),distanceKm:dist(twoOpt(raw.route))}:raw;
+      push(out);setBenchLive(null);
+    }
+  }
+
+  if(benchAlgos.includes("JEV Clustered")||benchAlgos.includes("JEV Clustered + 2-opt")){
+    for(const alg of ["JEV Clustered","JEV Clustered + 2-opt"]){
+      if(!benchAlgos.includes(alg))continue;
+      setBenchLive({algorithm:alg,route:[startCity],decisions:[]});
+      const onStep=(d:Decision,routeSoFar:Capital[])=>setBenchLive(prev=>prev?{...prev,route:routeSoFar,decisions:[...prev.decisions,d]}:prev);
+      const raw=await t(async()=>{
+        const r=await jevClustered(tourCities,startCity,settings,"geographic",setProviderMode,onStep,24);
+        return{algorithm:"JEV Clustered",route:r.route,distanceKm:dist(r.route),runtimeMs:0,decisions:r.decisions};
+      });
+      const out=alg.endsWith("2-opt")?{...raw,algorithm:alg,route:twoOpt(raw.route),distanceKm:dist(twoOpt(raw.route))}:{...raw,algorithm:alg};
       push(out);setBenchLive(null);
     }
   }

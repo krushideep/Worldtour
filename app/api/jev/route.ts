@@ -1,7 +1,7 @@
 import {NextResponse} from "next/server";
 type Capital={country:string;iso2:string;iso3:string;capital:string;lat:number;lon:number;region:string};
 type DistanceFeature={iso2:string;currentKm:number;nearestFutureKm:number;farthestFutureKm:number};
-type DecideRequest={step:number;current:Capital;candidates:Capital[];remaining:Capital[];mode?:"geographic"|"distance"|"matrix";distanceFeatures?:DistanceFeature[];distanceMatrix?:Record<string,Record<string,number>>};
+type DecideRequest={step:number;current:Capital;candidates:Capital[];remaining:Capital[];mode?:"geographic"|"distance"|"matrix";distanceFeatures?:DistanceFeature[]};
 function hav(a:Capital,b:Capital){const r=6371.0088,p=Math.PI/180,d1=(b.lat-a.lat)*p,d2=(b.lon-a.lon)*p,x=Math.sin(d1/2)**2+Math.cos(a.lat*p)*Math.cos(b.lat*p)*Math.sin(d2/2)**2;return 2*r*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function demoRank(current:Capital,candidates:Capital[],remaining:Capital[]){const scored=candidates.map(c=>{const local=hav(current,c);const rest=remaining.filter(y=>y.iso2!==c.iso2);const future=rest.length?Math.min(...rest.map(y=>hav(c,y))):0;const score=1/(1+local/2500)+0.35/(1+future/1800)+0.12*(c.region===current.region?1:0);return {iso2:c.iso2,score}}).sort((a,b)=>b.score-a.score);const max=scored[0]?.score||1;return scored.map(s=>({iso2:s.iso2,score:s.score/max}))}
 export async function GET(){return NextResponse.json({configured:Boolean(process.env.JEV_API_URL&&process.env.JEV_API_KEY)})}

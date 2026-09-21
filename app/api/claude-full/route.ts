@@ -24,6 +24,12 @@ async function claudeCliAvailable():Promise<boolean>{
 function extractJson(text:string){
   const cleaned=text.trim().replace(/^\`\`\`(?:json)?\s*/i,"").replace(/\s*\`\`\`$/,"").trim();
   try{return JSON.parse(cleaned)}catch{}
+  const routeMatches=cleaned.match(/\{\s*"route"\s*:\s*\[[^\[\]]*\]\s*\}/g);
+  if(routeMatches){
+    for(const candidate of [...routeMatches].reverse()){
+      try{return JSON.parse(candidate)}catch{}
+    }
+  }
   const match=cleaned.match(/\{[\s\S]*\}/);
   if(match)try{return JSON.parse(match[0])}catch{}
   return null;

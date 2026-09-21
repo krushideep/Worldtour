@@ -177,7 +177,7 @@ function DecisionMini({d}:{d?:Decision}){
 }
 function BenchCard({algorithm,route,decisions,distanceKm,runtimeMs,live,error}:{algorithm:string;route:Capital[];decisions:Decision[];distanceKm:number;runtimeMs:number;live?:boolean;error?:string}){
   return <div className={live?"benchCard live":error?"benchCard failed":"benchCard"}>
-    <div className="benchCardHead"><b>{algorithm}</b><span className={live?"runTag":error?"errorTag":"doneTag"}>{live?"RUNNING":error?"FAILED":"DONE"}</span><strong>{error?"—":distanceKm?distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><small>{live?decisions.length+"/195":error?"stopped":(runtimeMs/1000).toFixed(1)+" s"}</small></div>
+    <div className="benchCardHead"><b>{algorithm}</b><span className={live?"runTag":error?"errorTag":"doneTag"}>{live?"RUNNING":error?"FAILED":"DONE"}</span><strong>{error?"—":distanceKm?distanceKm.toLocaleString(undefined,{maximumFractionDigits:0})+" km":"—"}</strong><small>{live?(algorithm.includes("Clustered")?decisions.length+"/24 regions":decisions.length+"/195 decisions"):error?"stopped":(runtimeMs/1000).toFixed(1)+" s"}</small></div>
     {error?<div className="benchError">{error}</div>:<div className="benchCardBody">
       <div className="benchMini"><b>LIVE OUTPUT</b><div className="benchLog">{decisions.length?decisions.slice(-30).map((d,i)=><div key={i}>{decisionLine(d)}</div>):<span className="empty">—</span>}</div></div>
       <div className="benchMini"><b>DECISION</b><DecisionMini d={decisions[decisions.length-1]}/></div>

@@ -5,7 +5,8 @@ import {feature} from "topojson-client";
 import world from "world-atlas/countries-110m.json";
 
 type Capital={country:string;iso2:string;iso3:string;capital:string;lat:number;lon:number;region:string};
-type CommunicationTrace={provider:string;model?:string;request?:unknown;response?:unknown;latencyMs?:number};\ntype Decision={step:number;from:Capital;selected:Capital;candidates:{city:Capital;score:number;confidence?:number}[];distanceKm:number;confidence?:number;oracleIso2?:string;regretKm?:number;latencyMs?:number;strategy?:string;communication?:CommunicationTrace};
+type CommunicationTrace={provider:string;model?:string;request?:unknown;response?:unknown;latencyMs?:number};
+type Decision={step:number;from:Capital;selected:Capital;candidates:{city:Capital;score:number;confidence?:number}[];distanceKm:number;confidence?:number;oracleIso2?:string;regretKm?:number;latencyMs?:number;strategy?:string;communication?:CommunicationTrace};
 type Result={algorithm:string;route:Capital[];distanceKm:number;runtimeMs:number;decisions:Decision[]};
 type LogEntry={step:number;from:string;to:string;km:number;pct?:number;candidates?:string;communication?:CommunicationTrace}|{note:string};
 type Settings={};
@@ -144,7 +145,14 @@ const features=useMemo(()=>feature(world as any,(world as any).objects.countries
 async function run(){if(!cities.length||busyRef.current)return;busyRef.current=true;setRunning(true);setLog([]);const t=performance.now();
   try{
     const isJevLike=algorithm.startsWith("JEV"),isAiLike=algorithm==="AI Engine"||algorithm==="AI Engine + 2-opt",isCopilotLike=algorithm==="Copilot"||algorithm==="Copilot + 2-opt",isClaudeCliLike=algorithm==="Claude CLI"||algorithm==="Claude CLI + 2-opt",isClaudeFull=algorithm==="Claude Full Problem";
-    if(isClaudeFull){\n      setResult({algorithm,route:[startCity],distanceKm:0,runtimeMs:0,decisions:[]});setStep(0);\n      pushLog({note:`Claude Full Problem · one request · start/end ${startCity.capital}`});\n      const full=await claudeFullProblem(cities,startCity,claudeFullModel);\n      setResult({algorithm,route:full.route,distanceKm:dist(full.route),runtimeMs:full.latencyMs,decisions:[]});\n      setStep(full.route.length-1);\n      pushLog({note:`Claude returned a complete 195-capital route in ${(full.latencyMs/1000).toFixed(2)} s · independently measured ${dist(full.route).toFixed(0)} km`});\n    }else if(isJevLike||isAiLike||isCopilotLike||isClaudeCliLike){
+    if(isClaudeFull){
+      setResult({algorithm,route:[startCity],distanceKm:0,runtimeMs:0,decisions:[]});setStep(0);
+      pushLog({note:`Claude Full Problem · one request · start/end ${startCity.capital}`});
+      const full=await claudeFullProblem(cities,startCity,claudeFullModel);
+      setResult({algorithm,route:full.route,distanceKm:dist(full.route),runtimeMs:full.latencyMs,decisions:[]});
+      setStep(full.route.length-1);
+      pushLog({note:`Claude returned a complete 195-capital route in ${(full.latencyMs/1000).toFixed(2)} s · independently measured ${dist(full.route).toFixed(0)} km`});
+    }else if(isJevLike||isAiLike||isCopilotLike||isClaudeCliLike){
       setResult({algorithm,route:[startCity],distanceKm:0,runtimeMs:0,decisions:[]});setStep(0);
       let cumulative=0;
       const onStep=(d:Decision,routeSoFar:Capital[])=>{
